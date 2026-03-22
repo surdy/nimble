@@ -1,0 +1,6 @@
+phrase: open reddit
+title: Open Reddit
+action:
+  type: open_url
+  config:
+    url: https://www.reddit.com

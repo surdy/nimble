@@ -1,0 +1,6 @@
+phrase: open slack
+title: Open Slack
+action:
+  type: open_url
+  config:
+    url: slack://user?team=E01DLHH5JM6&id=U09HFCUTPUG

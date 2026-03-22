@@ -1,0 +1,6 @@
+phrase: copy email
+title: Copy email address
+action:
+  type: copy_text
+  config:
+    text: hello@example.com

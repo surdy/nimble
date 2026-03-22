@@ -1,0 +1,22 @@
+# Nimble — application settings
+#
+# This file is read once at startup. Changes to show_context_chip and
+# allow_duplicates take effect on the next relaunch.
+# The hotkey is managed automatically by the app; you normally do not need
+# to edit it here. Deleting the hotkey line will trigger the onboarding
+# screen on the next launch so you can choose a new shortcut.
+
+# hotkey: Super+Space   # uncomment and set your preferred global shortcut
+
+# Show the active-context chip inside the launcher bar.
+show_context_chip: true
+
+# When true (default), duplicate command phrases across YAML files are all
+# loaded without warnings. Set to false to enable first-file-wins deduplication
+# and surface warnings for any conflicting phrases.
+allow_duplicates: true
+
+# When true (default), ${VAR}-substituted script/list paths may resolve
+# outside the command directory. Set to false to restrict resolved paths to
+# the command directory only.
+allow_external_paths: true

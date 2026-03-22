@@ -1,0 +1,6 @@
+phrase: search google
+title: Search Google for…
+action:
+  type: open_url
+  config:
+    url: https://www.google.com/search?q={param}

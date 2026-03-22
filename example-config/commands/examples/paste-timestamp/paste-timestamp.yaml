@@ -1,0 +1,8 @@
+phrase: paste timestamp
+title: Paste current date/time
+action:
+  type: script_action
+  config:
+    script: timestamp.sh
+    arg: none
+    result_action: paste_text

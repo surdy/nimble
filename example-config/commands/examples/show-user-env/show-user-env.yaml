@@ -1,0 +1,10 @@
+phrase: show user env
+title: Show user-defined environment variables
+env:
+  INLINE_VAR: from-command-yaml
+action:
+  type: dynamic_list
+  config:
+    script: user-env.sh
+    arg: none
+    item_action: copy_text

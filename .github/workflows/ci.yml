@@ -1,0 +1,114 @@
+name: CI
+
+on:
+  workflow_dispatch: # disabled: re-add push/pull_request triggers to re-enable
+
+jobs:
+  ci:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-22.04, windows-latest]
+    runs-on: ${{ matrix.os }}
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Set up Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Cache Cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-${{ hashFiles('src-tauri/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Cache node_modules
+        uses: actions/cache@v4
+        with:
+          path: node_modules
+          key: ${{ runner.os }}-node-${{ hashFiles('package-lock.json') }}
+          restore-keys: ${{ runner.os }}-node-
+
+      # Linux: Tauri WebKit deps, libxdo (build dep for xdo crate), and Flatpak toolchain
+      - name: Install Linux system dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libxdo-dev \
+            flatpak \
+            flatpak-builder
+          flatpak remote-add --user --if-not-exists flathub \
+            https://flathub.org/repo/flathub.flatpakrepo
+          flatpak install --user --noninteractive flathub \
+            org.gnome.Sdk//45 \
+            org.gnome.Platform//45
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      # Tests
+      - name: Run backend tests
+        run: cargo test --manifest-path src-tauri/Cargo.toml
+
+      # Platform builds
+      - name: Build (macOS - dmg)
+        if: runner.os == 'macOS'
+        run: npm run tauri build -- --bundles dmg
+
+      # Tauri 2 has no native Flatpak bundler; build the binary then use flatpak-builder.
+      - name: Build binary (Linux)
+        if: runner.os == 'Linux'
+        run: npm run tauri build -- --no-bundle
+
+      - name: Build Flatpak
+        if: runner.os == 'Linux'
+        run: |
+          flatpak-builder --force-clean --user \
+            --repo=flatpak-repo \
+            build-dir \
+            flatpak/app.nimble.App.json
+          flatpak build-bundle flatpak-repo \
+            nimble.flatpak \
+            app.nimble.App
+
+      - name: Build (Windows - msi)
+        if: runner.os == 'Windows'
+        run: npm run tauri build -- --bundles msi
+
+      # Upload artefacts
+      - name: Upload macOS artefact
+        if: runner.os == 'macOS'
+        uses: actions/upload-artifact@v4
+        with:
+          name: nimble-macos
+          path: src-tauri/target/release/bundle/dmg/*.dmg
+
+      - name: Upload Linux artefact
+        if: runner.os == 'Linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: nimble-linux
+          path: nimble.flatpak
+
+      - name: Upload Windows artefact
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: nimble-windows
+          path: src-tauri/target/release/bundle/msi/*.msi

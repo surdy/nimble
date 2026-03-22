@@ -1,0 +1,24 @@
+# WinGet package manifest — version template
+# Kept for reference only. The release workflow uses wingetcreate to generate
+# final per-version manifests and open a PR against microsoft/winget-pkgs.
+
+PackageIdentifier: Surdy.Nimble
+PackageVersion: 0.1.0
+PackageLocale: en-US
+Publisher: Surdy
+PublisherUrl: https://github.com/surdy
+PackageName: Nimble
+PackageUrl: https://github.com/surdy/nimble
+License: MIT
+ShortDescription: A cross-platform command-driven desktop launcher
+Description: |-
+  Nimble is a keyboard-driven launcher where users type multi-word
+  phrase commands. It supports opening URLs, pasting text, copying text,
+  displaying static lists, and running dynamic scripts.
+Moniker: nimble
+Tags:
+  - launcher
+  - productivity
+  - keyboard
+ManifestType: defaultLocale
+ManifestVersion: 1.6.0

@@ -1,0 +1,6 @@
+phrase: paste email
+title: Paste email address
+action:
+  type: paste_text
+  config:
+    text: hello@example.com

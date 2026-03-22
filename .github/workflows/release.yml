@@ -1,0 +1,243 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
+
+jobs:
+  # ── Build binaries on each platform ───────────────────────────────────────
+  build:
+    if: github.repository == 'surdy/nimble'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            platform: macos
+          - os: ubuntu-22.04
+            platform: linux
+          - os: windows-latest
+            platform: windows
+
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Set up Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Cache Cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-${{ hashFiles('src-tauri/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Cache node_modules
+        uses: actions/cache@v4
+        with:
+          path: node_modules
+          key: ${{ runner.os }}-node-${{ hashFiles('package-lock.json') }}
+          restore-keys: ${{ runner.os }}-node-
+
+      - name: Install Linux system dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libxdo-dev \
+            flatpak \
+            flatpak-builder
+          flatpak remote-add --user --if-not-exists flathub \
+            https://flathub.org/repo/flathub.flatpakrepo
+          flatpak install --user --noninteractive flathub \
+            org.gnome.Sdk//45 \
+            org.gnome.Platform//45
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Build (macOS - dmg)
+        if: runner.os == 'macOS'
+        run: npm run tauri build -- --bundles dmg
+
+      - name: Build binary (Linux)
+        if: runner.os == 'Linux'
+        run: npm run tauri build -- --no-bundle
+
+      - name: Build Flatpak
+        if: runner.os == 'Linux'
+        run: |
+          flatpak-builder --force-clean --user \
+            --repo=flatpak-repo \
+            build-dir \
+            flatpak/io.switchpanel.nimble.json
+          flatpak build-bundle flatpak-repo \
+            nimble.flatpak \
+            io.switchpanel.nimble
+
+      - name: Build (Windows - msi)
+        if: runner.os == 'Windows'
+        run: npm run tauri build -- --bundles msi
+
+      - name: Upload macOS artifact
+        if: runner.os == 'macOS'
+        uses: actions/upload-artifact@v4
+        with:
+          name: artifact-macos
+          path: src-tauri/target/release/bundle/dmg/*.dmg
+
+      - name: Upload Linux artifact
+        if: runner.os == 'Linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: artifact-linux
+          path: nimble.flatpak
+
+      - name: Upload Windows artifact
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: artifact-windows
+          path: src-tauri/target/release/bundle/msi/*.msi
+
+  # ── Publish GitHub Release + update Homebrew tap + submit WinGet PR ────────
+  publish:
+    if: github.repository == 'surdy/nimble'
+    needs: build
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Collect artifact paths and compute SHA256 checksums
+        id: sha
+        run: |
+          DMG=$(ls artifacts/artifact-macos/*.dmg | head -1)
+          FLATPAK=$(ls artifacts/artifact-linux/*.flatpak | head -1)
+          MSI=$(ls artifacts/artifact-windows/*.msi | head -1)
+          echo "dmg_path=$DMG" >> $GITHUB_OUTPUT
+          echo "flatpak_path=$FLATPAK" >> $GITHUB_OUTPUT
+          echo "msi_path=$MSI" >> $GITHUB_OUTPUT
+          echo "dmg_sha=$(sha256sum $DMG | awk '{print $1}')" >> $GITHUB_OUTPUT
+          echo "flatpak_sha=$(sha256sum $FLATPAK | awk '{print $1}')" >> $GITHUB_OUTPUT
+          echo "msi_sha=$(sha256sum $MSI | awk '{print $1}')" >> $GITHUB_OUTPUT
+
+      - name: Create GitHub Release
+        id: release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            ${{ steps.sha.outputs.dmg_path }}
+            ${{ steps.sha.outputs.flatpak_path }}
+            ${{ steps.sha.outputs.msi_path }}
+
+      - name: Update Homebrew tap
+        run: |
+          TAG=${{ github.ref_name }}
+          VER=${TAG#v}
+          DMG_NAME=$(basename "${{ steps.sha.outputs.dmg_path }}")
+          FLATPAK_NAME=$(basename "${{ steps.sha.outputs.flatpak_path }}")
+          RELEASE_BASE="https://github.com/surdy/nimble/releases/download/${TAG}"
+
+          eval "$(ssh-agent -s)"
+          echo "${{ secrets.TAP_DEPLOY_KEY }}" | ssh-add -
+          git clone git@github.com:surdy/homebrew-tap.git /tmp/homebrew-tap
+          cd /tmp/homebrew-tap
+
+          sed -i "s|version \".*\"|version \"${VER}\"|" Formula/nimble.rb
+          sed -i "s|PLACEHOLDER_MACOS_ARM_SHA256|${{ steps.sha.outputs.dmg_sha }}|" Formula/nimble.rb
+          sed -i "s|PLACEHOLDER_MACOS_X86_SHA256|${{ steps.sha.outputs.dmg_sha }}|" Formula/nimble.rb
+          sed -i "s|PLACEHOLDER_LINUX_X86_SHA256|${{ steps.sha.outputs.flatpak_sha }}|" Formula/nimble.rb
+          sed -i "s|nimble-aarch64-apple-darwin.tar.gz|${DMG_NAME}|" Formula/nimble.rb
+          sed -i "s|nimble-x86_64-apple-darwin.tar.gz|${DMG_NAME}|" Formula/nimble.rb
+          sed -i "s|nimble-x86_64-unknown-linux-gnu.tar.gz|${FLATPAK_NAME}|" Formula/nimble.rb
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/nimble.rb
+          git diff --cached --quiet || git commit -m "chore: update nimble to ${VER}"
+          git push origin main
+
+      - name: Update WinGet manifest
+        run: |
+          TAG=${{ github.ref_name }}
+          VER=${TAG#v}
+          MSI_NAME=$(basename "${{ steps.sha.outputs.msi_path }}")
+          MSI_URL="https://github.com/surdy/nimble/releases/download/${TAG}/${MSI_NAME}"
+          MSI_SHA="${{ steps.sha.outputs.msi_sha }}"
+
+          eval "$(ssh-agent -s)"
+          echo "${{ secrets.WINGET_DEPLOY_KEY }}" | ssh-add -
+          git clone git@github.com:surdy/winget-pkgs.git /tmp/winget-pkgs
+          cd /tmp/winget-pkgs
+
+          MANIFEST_DIR="manifests/s/Surdy/Nimble/${VER}"
+          mkdir -p "${MANIFEST_DIR}"
+
+          cat > "${MANIFEST_DIR}/Surdy.Nimble.yaml" <<EOF
+          PackageIdentifier: Surdy.Nimble
+          PackageVersion: ${VER}
+          DefaultLocale: en-US
+          ManifestType: version
+          ManifestVersion: 1.6.0
+          EOF
+
+          cat > "${MANIFEST_DIR}/Surdy.Nimble.locale.en-US.yaml" <<EOF
+          PackageIdentifier: Surdy.Nimble
+          PackageVersion: ${VER}
+          PackageLocale: en-US
+          Publisher: Surdy
+          PublisherUrl: https://github.com/surdy
+          PackageName: Nimble
+          PackageUrl: https://github.com/surdy/nimble
+          License: MIT
+          ShortDescription: A cross-platform command-driven desktop launcher
+          Tags:
+            - launcher
+            - productivity
+            - keyboard
+          ManifestType: defaultLocale
+          ManifestVersion: 1.6.0
+          EOF
+
+          cat > "${MANIFEST_DIR}/Surdy.Nimble.installer.yaml" <<EOF
+          PackageIdentifier: Surdy.Nimble
+          PackageVersion: ${VER}
+          InstallerType: wix
+          Installers:
+            - Architecture: x64
+              InstallerUrl: ${MSI_URL}
+              InstallerSha256: ${MSI_SHA}
+          ManifestType: installer
+          ManifestVersion: 1.6.0
+          EOF
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add .
+          git diff --cached --quiet || git commit -m "chore: update nimble to ${VER}"
+          git push origin main

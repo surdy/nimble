@@ -1,0 +1,6 @@
+phrase: open google
+title: Open Google
+action:
+  type: open_url
+  config:
+    url: https://www.google.com

@@ -1,0 +1,8 @@
+phrase: say hello
+title: Say hello (dynamic list example)
+action:
+  type: dynamic_list
+  config:
+    script: hello.sh
+    arg: optional
+    item_action: paste_text

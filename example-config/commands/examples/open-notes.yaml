@@ -1,0 +1,6 @@
+phrase: open notes
+title: Open Notes
+action:
+  type: open_url
+  config:
+    url: obsidian://adv-uri?vault=Customer Notes

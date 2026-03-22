@@ -1,0 +1,13 @@
+# This command demonstrates referencing a script outside the command directory
+# using ${NIMBLE_CONFIG_DIR} variable substitution.
+#
+# The script lives in Nimble/scripts/greeting.sh — not co-located with this
+# YAML. Nimble resolves ${NIMBLE_CONFIG_DIR} to the config root at runtime.
+
+phrase: shared greeting
+title: Show greeting from shared script
+action:
+  type: dynamic_list
+  config:
+    script: ${NIMBLE_CONFIG_DIR}/scripts/greeting.sh
+    arg: none

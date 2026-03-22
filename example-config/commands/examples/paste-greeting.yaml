@@ -1,0 +1,11 @@
+phrase: paste greeting
+title: Paste polite greeting
+action:
+  type: paste_text
+  config:
+    text: |
+      Hi,
+
+      Thank you for reaching out.
+
+      Best regards

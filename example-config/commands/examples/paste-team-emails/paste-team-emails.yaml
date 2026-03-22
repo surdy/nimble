@@ -1,0 +1,9 @@
+phrase: paste team emails
+title: Paste all team email addresses
+action:
+  type: script_action
+  config:
+    script: team-emails.sh
+    arg: none
+    result_action: paste_text
+    suffix: "\n"

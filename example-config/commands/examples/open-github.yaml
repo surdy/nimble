@@ -1,0 +1,6 @@
+phrase: open github
+title: Open GitHub
+action:
+  type: open_url
+  config:
+    url: https://github.com

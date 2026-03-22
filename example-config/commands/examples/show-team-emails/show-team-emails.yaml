@@ -1,0 +1,7 @@
+phrase: team emails
+title: Team email addresses
+action:
+  type: static_list
+  config:
+    list: team-emails
+    item_action: paste_text

@@ -1,0 +1,8 @@
+phrase: copy uuid
+title: Copy a new UUID to clipboard
+action:
+  type: script_action
+  config:
+    script: uuid.sh
+    arg: none
+    result_action: copy_text

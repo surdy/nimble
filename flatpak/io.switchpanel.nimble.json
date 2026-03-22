@@ -1,0 +1,33 @@
+{
+  "app-id": "io.switchpanel.nimble",
+  "runtime": "org.gnome.Platform",
+  "runtime-version": "45",
+  "sdk": "org.gnome.Sdk",
+  "command": "nimble",
+  "finish-args": [
+    "--share=ipc",
+    "--socket=x11",
+    "--socket=fallback-x11",
+    "--socket=wayland",
+    "--share=network",
+    "--device=dri",
+    "--filesystem=xdg-config/Nimble:create",
+    "--talk-name=org.freedesktop.Notifications",
+    "--talk-name=org.freedesktop.portal.Desktop"
+  ],
+  "modules": [
+    {
+      "name": "nimble",
+      "buildsystem": "simple",
+      "build-commands": [
+        "install -Dm755 nimble /app/bin/nimble"
+      ],
+      "sources": [
+        {
+          "type": "file",
+          "path": "../src-tauri/target/release/nimble"
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,8 @@
+phrase: open morning sites
+title: Open morning reading sites
+action:
+  type: script_action
+  config:
+    script: morning-sites.sh
+    arg: none
+    result_action: open_url

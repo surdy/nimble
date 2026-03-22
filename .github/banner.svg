@@ -1,0 +1,56 @@
+<svg width="1280" height="320" viewBox="0 0 1280 320" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <radialGradient id="bg" cx="50%" cy="45%" r="70%">
+      <stop offset="0%" stop-color="#110b1c"/>
+      <stop offset="100%" stop-color="#080610"/>
+    </radialGradient>
+    <linearGradient id="card-fill" x1="56" y1="92" x2="220" y2="132" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#c026d3"/>
+      <stop offset="100%" stop-color="#7c3aed"/>
+    </linearGradient>
+    <linearGradient id="title-grad" x1="300" y1="100" x2="640" y2="200" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#e879f9"/>
+      <stop offset="100%" stop-color="#a78bfa"/>
+    </linearGradient>
+    <filter id="glow" x="-20%" y="-40%" width="140%" height="200%">
+      <feGaussianBlur stdDeviation="12" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <filter id="shadow" x="-5%" y="-10%" width="110%" height="140%">
+      <feDropShadow dx="0" dy="4" stdDeviation="6" flood-color="#000000" flood-opacity="0.5"/>
+    </filter>
+  </defs>
+
+  <!-- Background -->
+  <rect width="1280" height="320" fill="url(#bg)"/>
+  <!-- Subtle top/bottom border lines -->
+  <rect x="0" y="0" width="1280" height="1" fill="#c026d3" opacity="0.15"/>
+  <rect x="0" y="319" width="1280" height="1" fill="#7c3aed" opacity="0.15"/>
+
+  <!-- Mini icon: stacked cards (scaled from the D3 Warm Neon design) -->
+  <!-- Card 3 -->
+  <rect x="72" y="162" width="160" height="24" rx="5" fill="#281630"/>
+  <!-- Card 2 -->
+  <rect x="60" y="134" width="184" height="26" rx="6" fill="#341848" filter="url(#shadow)"/>
+  <circle cx="76" cy="147" r="3" fill="#c026d3" opacity="0.55"/>
+  <rect x="84" y="143" width="56" height="4" rx="2" fill="#5a2878" opacity="0.9"/>
+  <!-- Card 1 — active -->
+  <rect x="48" y="100" width="208" height="30" rx="7" fill="url(#card-fill)" filter="url(#shadow)"/>
+  <rect x="48" y="100" width="208" height="1" rx="0.5" fill="white" opacity="0.25"/>
+  <circle cx="64" cy="115" r="4" fill="white" opacity="0.9"/>
+  <rect x="74" y="111" width="82" height="5" rx="2.5" fill="white" opacity="0.95"/>
+  <rect x="162" y="111" width="40" height="5" rx="2.5" fill="white" opacity="0.4"/>
+  <rect x="214" y="109" width="30" height="11" rx="5.5" fill="white" opacity="0.15"/>
+
+  <!-- App name -->
+  <text x="300" y="152" font-family="-apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', sans-serif" font-size="72" font-weight="700" fill="url(#title-grad)" letter-spacing="-1">Nimble</text>
+
+  <!-- Tagline -->
+  <text x="302" y="192" font-family="-apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Segoe UI', sans-serif" font-size="22" font-weight="400" fill="#8b7fa8" letter-spacing="0.5">A fast, command-driven desktop launcher</text>
+
+  <!-- Subtle floating accent dots -->
+  <circle cx="1140" cy="80" r="2" fill="#c026d3" opacity="0.25"/>
+  <circle cx="1180" cy="120" r="1.5" fill="#7c3aed" opacity="0.20"/>
+  <circle cx="1100" cy="200" r="1" fill="#e879f9" opacity="0.15"/>
+  <circle cx="1200" cy="240" r="2.5" fill="#7c3aed" opacity="0.12"/>
+</svg>
