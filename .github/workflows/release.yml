@@ -159,26 +159,19 @@ jobs:
         run: |
           TAG=${{ github.ref_name }}
           VER=${TAG#v}
-          DMG_NAME=$(basename "${{ steps.sha.outputs.dmg_path }}")
-          FLATPAK_NAME=$(basename "${{ steps.sha.outputs.flatpak_path }}")
-          RELEASE_BASE="https://github.com/surdy/nimble/releases/download/${TAG}"
+          DMG_SHA="${{ steps.sha.outputs.dmg_sha }}"
 
           eval "$(ssh-agent -s)"
           echo "${{ secrets.TAP_DEPLOY_KEY }}" | ssh-add -
           git clone git@github.com:surdy/homebrew-tap.git /tmp/homebrew-tap
           cd /tmp/homebrew-tap
 
-          sed -i "s|version \".*\"|version \"${VER}\"|" Formula/nimble.rb
-          sed -i "s|PLACEHOLDER_MACOS_ARM_SHA256|${{ steps.sha.outputs.dmg_sha }}|" Formula/nimble.rb
-          sed -i "s|PLACEHOLDER_MACOS_X86_SHA256|${{ steps.sha.outputs.dmg_sha }}|" Formula/nimble.rb
-          sed -i "s|PLACEHOLDER_LINUX_X86_SHA256|${{ steps.sha.outputs.flatpak_sha }}|" Formula/nimble.rb
-          sed -i "s|nimble-aarch64-apple-darwin.tar.gz|${DMG_NAME}|" Formula/nimble.rb
-          sed -i "s|nimble-x86_64-apple-darwin.tar.gz|${DMG_NAME}|" Formula/nimble.rb
-          sed -i "s|nimble-x86_64-unknown-linux-gnu.tar.gz|${FLATPAK_NAME}|" Formula/nimble.rb
+          sed -i "s|version \".*\"|version \"${VER}\"|" Casks/nimble.rb
+          sed -i "s|sha256 \".*\"|sha256 \"${DMG_SHA}\"|" Casks/nimble.rb
 
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add Formula/nimble.rb
+          git add Casks/nimble.rb
           git diff --cached --quiet || git commit -m "chore: update nimble to ${VER}"
           git push origin main
 
