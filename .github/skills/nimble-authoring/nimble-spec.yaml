@@ -8,7 +8,7 @@
 # Last updated: 2026-03-25
 # Spec version: 2
 
-spec_version: 2
+spec_version: 3
 
 # ── Config directory locations ──────────────────────────────────────────
 config_dirs:
@@ -55,6 +55,11 @@ command_schema:
     - "Each .yaml file contains exactly one command."
     - "Files can be nested in any subdirectory structure under commands/."
     - "Phrases starting with / are reserved — the loader rejects them."
+    - >-
+      Longest phrase wins: when two commands match in param mode and one
+      phrase is a prefix of the other (e.g. 'ae' vs 'ae email'), the
+      longer phrase is sorted first so it becomes the default Enter
+      target. Both commands remain visible in the results list.
 
 # ── Action types ────────────────────────────────────────────────────────
 action_types:
@@ -432,3 +437,7 @@ changelog:
       - "Config directory paths updated to use bundle identifier (io.switchpanel.nimble)."
       - "Fixed action_selection_guide static_list entry to reference TSV not YAML."
       - "NIMBLE_CONFIG_DIR and NIMBLE_COMMAND_DIR examples updated to match actual paths."
+  - version: 3
+    date: "2026-03-25"
+    changes:
+      - "Added longest-phrase-wins matching rule for param-mode conflicts."

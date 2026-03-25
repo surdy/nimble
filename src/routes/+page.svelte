@@ -115,24 +115,45 @@
   const filtered = $derived(
     effectiveInput === ""
       ? []
-      : commands
-          .filter(cmd => {
+      : (() => {
+          const typed = effectiveInput.toLowerCase();
+          const matches = commands.filter(cmd => {
             const phrase = cmd.phrase.toLowerCase();
-            const typed  = effectiveInput.toLowerCase();
             // Standard partial/substring match (discovery while typing)
             // OR param mode: user has typed the full phrase + space + param text
             return phrase.includes(typed) || typed.startsWith(phrase + " ");
-          })
+          });
+          // Longest-phrase-wins: when multiple commands match in param mode,
+          // sort the longer phrase first so it is the default Enter target.
+          return matches.slice().sort((a, b) => {
+            const ap = a.phrase.toLowerCase();
+            const bp = b.phrase.toLowerCase();
+            const aParam = typed.startsWith(ap + " ");
+            const bParam = typed.startsWith(bp + " ");
+            if (aParam && bParam) return bp.length - ap.length;
+            return 0;
+          });
+        })()
   );
 
   // Built-in / commands filtered by the current raw input (only when input starts with "/")
   const filteredBuiltins: Command[] = $derived(
     input.trim().startsWith("/")
-      ? builtinCommands.filter(cmd => {
-          const phrase = cmd.phrase.toLowerCase();
-          const typed  = input.trim().toLowerCase();
-          return phrase.includes(typed) || typed.startsWith(phrase + " ");
-        })
+      ? (() => {
+          const typed = input.trim().toLowerCase();
+          const matches = builtinCommands.filter(cmd => {
+            const phrase = cmd.phrase.toLowerCase();
+            return phrase.includes(typed) || typed.startsWith(phrase + " ");
+          });
+          return matches.slice().sort((a, b) => {
+            const ap = a.phrase.toLowerCase();
+            const bp = b.phrase.toLowerCase();
+            const aParam = typed.startsWith(ap + " ");
+            const bParam = typed.startsWith(bp + " ");
+            if (aParam && bParam) return bp.length - ap.length;
+            return 0;
+          });
+        })()
       : []
   );
 
@@ -874,17 +895,17 @@
     max-height: calc(8 * 56px);
     overflow-y: auto;
     scrollbar-width: thin;
-    scrollbar-color: rgba(255,255,255,.2) transparent;
+    scrollbar-color: rgba(255,255,255,.45) transparent;
   }
 
   .results::-webkit-scrollbar { width: 6px; }
   .results::-webkit-scrollbar-track { background: transparent; }
   .results::-webkit-scrollbar-thumb {
-    background: rgba(255,255,255,.2);
+    background: rgba(255,255,255,.45);
     border-radius: 3px;
   }
   .results::-webkit-scrollbar-thumb:hover {
-    background: rgba(255,255,255,.35);
+    background: rgba(255,255,255,.65);
   }
 
   .result-row {

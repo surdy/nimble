@@ -145,11 +145,26 @@ jobs:
           echo "flatpak_sha=$(sha256sum $FLATPAK | awk '{print $1}')" >> $GITHUB_OUTPUT
           echo "msi_sha=$(sha256sum $MSI | awk '{print $1}')" >> $GITHUB_OUTPUT
 
+      - name: Extract changelog for this version
+        id: changelog
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          VER="${TAG#v}"
+          # Extract the section for this version from CHANGELOG.md
+          awk -v ver="$VER" '
+            /^## \[/ { if (found) exit; if (index($0, ver)) found=1; next }
+            found { print }
+          ' CHANGELOG.md > /tmp/release-notes.md
+          # Fallback if no section found
+          if [ ! -s /tmp/release-notes.md ]; then
+            echo "Release ${VER}" > /tmp/release-notes.md
+          fi
+
       - name: Create GitHub Release
         id: release
         uses: softprops/action-gh-release@v2
         with:
-          generate_release_notes: true
+          body_path: /tmp/release-notes.md
           files: |
             ${{ steps.sha.outputs.dmg_path }}
             ${{ steps.sha.outputs.flatpak_path }}
