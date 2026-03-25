@@ -39,16 +39,29 @@ When you invoke the launcher and start typing, Nimble shows partial matches in r
 
 ### macOS
 
+#### Option A — Homebrew
+
+```sh
+brew tap surdy/tap
+brew install --cask nimble
+```
+
+#### Option B — Manual download
+
 1. Download the latest `.dmg` from the [Releases page](https://github.com/surdy/nimble/releases)
 2. Open the `.dmg`, drag **Nimble.app** into **Applications**, then eject the disk image
 
-**Gatekeeper warning** — because Nimble is not yet notarized by Apple, macOS will block the first launch. To allow it:
+#### Gatekeeper warning
 
-1. Open **System Settings → Privacy & Security**
-2. Scroll to the **Security** section and click **Open Anyway**
-3. Confirm by clicking **Open** in the dialog
+Nimble is not yet notarized by Apple, so macOS will block the first launch with an _"app is damaged"_ or _"can't be verified"_ message. Choose **one** of these workarounds:
 
-> **Alternative:** Right-click **Nimble.app** in Finder and choose **Open** — the dialog will include an **Open** button even for unsigned apps.
+| Method | Steps |
+|--------|-------|
+| **System Settings** | Open **System Settings → Privacy & Security**, scroll to **Security**, click **Open Anyway**, then confirm |
+| **Right-click → Open** | Right-click **Nimble.app** in Finder, choose **Open**, then click **Open** in the dialog |
+| **Terminal** | Run `xattr -cr /Applications/Nimble.app` then open the app normally |
+
+> This is a one-time step. Subsequent launches work without intervention.
 
 **Accessibility permission** — required for the Paste Text action to simulate `⌘V`:
 
@@ -89,7 +102,7 @@ Without this, paste commands write to the clipboard but skip the keystroke simul
 |-------|-------------|
 | [Getting started](docs/getting-started.md) | Onboarding walkthrough, choosing your shortcut, creating your first command |
 | [Actions](docs/actions/README.md) | All six action types: Open URL, Paste Text, Copy Text, Static List, Dynamic List, Script Action |
-| [Guides](docs/guides/README.md) | Configuring commands, writing scripts, contexts, Copilot agents |
+| [Guides](docs/guides/README.md) | Configuring commands, writing scripts, contexts, Copilot skill |
 | [Reference](docs/reference/README.md) | Config directory structure, duplicate commands, tips & tricks |
 
 ---

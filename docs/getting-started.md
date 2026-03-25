@@ -46,6 +46,43 @@ Your shortcut is stored in `settings.yaml` inside the [config directory](referen
 
 ---
 
+## Install
+
+### macOS
+
+#### Homebrew (recommended)
+
+```sh
+brew tap surdy/tap
+brew install --cask nimble
+```
+
+#### Manual download
+
+Download the latest `.dmg` from the [Releases page](https://github.com/surdy/nimble/releases), open it, and drag **Nimble.app** into **Applications**.
+
+#### Gatekeeper warning
+
+Nimble is not yet notarized by Apple, so macOS will block the first launch. Choose one of these one-time workarounds:
+
+- **System Settings →** Open **Privacy & Security**, scroll to **Security**, click **Open Anyway**
+- **Right-click →** Right-click **Nimble.app** in Finder, choose **Open**, click **Open** in the dialog
+- **Terminal →** `xattr -cr /Applications/Nimble.app`
+
+### Linux
+
+```bash
+# Download the .flatpak from the Releases page, then:
+flatpak install --user nimble.flatpak
+flatpak run Nimble
+```
+
+### Windows
+
+Download the `.msi` from the [Releases page](https://github.com/surdy/nimble/releases) and run the installer. Windows SmartScreen may show a warning — click **More info → Run anyway**.
+
+---
+
 ## Supported platforms
 
 - **macOS** — primary target, fully supported

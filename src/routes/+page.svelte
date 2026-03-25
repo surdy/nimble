@@ -3,7 +3,7 @@
   import { invoke } from "@tauri-apps/api/core";
   import { getCurrentWindow, LogicalSize } from "@tauri-apps/api/window";
   import { listen } from "@tauri-apps/api/event";
-  import type { AppSettings, Command, CommandsPayload, DuplicateWarning, ListItem, ReservedPhraseWarning } from "$lib/types";
+  import type { Action, AppSettings, Command, CommandsPayload, DuplicateWarning, ListItem, ReservedPhraseWarning } from "$lib/types";
 
   // ── State ──────────────────────────────────────────────────────────────
   let input = $state("");
@@ -37,25 +37,60 @@
     {
       phrase: "/ctx set",
       title: activeContext ? `Change context (current: "${activeContext}")` : "Set context",
+      env: {}, source_dir: "",
       action: { type: "builtin", config: { action: "ctx_set" } },
     },
     {
       phrase: "/ctx reset",
       title: "Reset context",
+      env: {}, source_dir: "",
       action: { type: "builtin", config: { action: "ctx_reset" } },
+    },
+    {
+      phrase: "/docs skill",
+      title: "How to deploy the Copilot skill to your project",
+      env: {}, source_dir: "",
+      action: { type: "builtin", config: { action: "docs_open", url: "https://github.com/surdy/nimble/blob/main/docs/guides/deploying-skill.md" } },
+    },
+    {
+      phrase: "/docs commands",
+      title: "How to configure YAML commands",
+      env: {}, source_dir: "",
+      action: { type: "builtin", config: { action: "docs_open", url: "https://github.com/surdy/nimble/blob/main/docs/guides/configuring-commands.md" } },
+    },
+    {
+      phrase: "/docs scripts",
+      title: "How to write scripts for dynamic lists and script actions",
+      env: {}, source_dir: "",
+      action: { type: "builtin", config: { action: "docs_open", url: "https://github.com/surdy/nimble/blob/main/docs/guides/writing-scripts.md" } },
+    },
+    {
+      phrase: "/docs actions",
+      title: "All six action types — open_url, paste_text, copy_text, static_list, dynamic_list, script_action",
+      env: {}, source_dir: "",
+      action: { type: "builtin", config: { action: "docs_open", url: "https://github.com/surdy/nimble/blob/main/docs/actions/README.md" } },
+    },
+    {
+      phrase: "/docs contexts",
+      title: "Contexts — scoped matching with /ctx set and /ctx reset",
+      env: {}, source_dir: "",
+      action: { type: "builtin", config: { action: "docs_open", url: "https://github.com/surdy/nimble/blob/main/docs/guides/contexts.md" } },
     },
   ]);
 
   // List expansion state — populated when input exactly matches a static_list phrase
   let listItems = $state<ListItem[]>([]);
   let activeListCmd = $state<Command | null>(null);
+  let resultsEl: HTMLDivElement | undefined = $state();
 
   // ── Filtering & navigation ─────────────────────────────────────────────
   const MAX_RESULTS = 8;
   const ROW_H = 56; // px per result row
 
   // Human-readable badge label for each action type
-  function actionBadge(type: string): string {
+  function actionBadge(cmd: { action: Action }): string {
+    const type = cmd.action.type;
+    if (type === "builtin" && cmd.action.config.action === "docs_open") return "Docs";
     switch (type) {
       case "open_url":       return "URL";
       case "paste_text":     return "Paste";
@@ -88,7 +123,6 @@
             // OR param mode: user has typed the full phrase + space + param text
             return phrase.includes(typed) || typed.startsWith(phrase + " ");
           })
-          .slice(0, MAX_RESULTS)
   );
 
   // Built-in / commands filtered by the current raw input (only when input starts with "/")
@@ -115,6 +149,14 @@
   $effect(() => {
     void allFiltered;
     selectedIndex = 0;
+  });
+
+  // Scroll the selected row into view when navigating with arrow keys
+  $effect(() => {
+    if (resultsEl) {
+      const row = resultsEl.children[selectedIndex] as HTMLElement | undefined;
+      row?.scrollIntoView({ block: "nearest" });
+    }
   });
 
   // Detect exact-phrase match for static_list / dynamic_list commands and load items.
@@ -213,7 +255,7 @@
     const contentHeight = !hasQuery ? 0
       : showingList ? Math.min(listItems.length, MAX_RESULTS) * ROW_H
       : allFiltered.length === 0 ? 44          // "no results" row
-      : allFiltered.length * ROW_H;
+      : Math.min(allFiltered.length, MAX_RESULTS) * ROW_H;
     appWindow.setSize(new LogicalSize(640, 64 + warnExtra + contentHeight));
   });
 
@@ -400,6 +442,10 @@
         activeContext = "";
         input = "";
         // do NOT dismiss
+      } else if (builtinAction === "docs_open" && cmd.action.config.url) {
+        await invoke("open_url", { url: cmd.action.config.url, param: null });
+        input = "";
+        dismissWithFocusRestore();
       }
     }
   }
@@ -590,7 +636,7 @@
     {/if}
 
     {#if input.trim() !== ""}
-      <div class="results">
+      <div class="results" bind:this={resultsEl}>
         {#if showingList}
           {#each listItems as item, i}
             <!-- svelte-ignore a11y_no_static_element_interactions -->
@@ -641,8 +687,8 @@
                   {/if}
                 </span>
               </div>
-              {#if actionBadge(cmd.action.type)}
-                <span class="action-badge">{actionBadge(cmd.action.type)}</span>
+              {#if actionBadge(cmd)}
+                <span class="action-badge">{actionBadge(cmd)}</span>
               {/if}
             </div>
           {/each}
@@ -825,6 +871,20 @@
     display: flex;
     flex-direction: column;
     gap: 2px;
+    max-height: calc(8 * 56px);
+    overflow-y: auto;
+    scrollbar-width: thin;
+    scrollbar-color: rgba(255,255,255,.2) transparent;
+  }
+
+  .results::-webkit-scrollbar { width: 6px; }
+  .results::-webkit-scrollbar-track { background: transparent; }
+  .results::-webkit-scrollbar-thumb {
+    background: rgba(255,255,255,.2);
+    border-radius: 3px;
+  }
+  .results::-webkit-scrollbar-thumb:hover {
+    background: rgba(255,255,255,.35);
   }
 
   .result-row {
