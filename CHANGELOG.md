@@ -5,6 +5,12 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [0.5.0] — 2026-03-26
+
+### Fixed
+- **Paste action now targets correct window on macOS** — replaced enigo with `core-graphics` CGEvent API for Cmd+V simulation; events post at HID level which reliably reaches the previously focused app. Timing adjusted to 100ms focus restore + 30ms clipboard settle.
+- **Overlay scrollbar now visible in production builds** — added `color-scheme: dark` to `<html>` so macOS WKWebView overlay scrollbars render a light thumb against the dark launcher background; previously only worked in dev mode.
+
 ## [0.4.0] — 2026-03-25
 
 ### Changed

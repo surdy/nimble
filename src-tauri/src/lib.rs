@@ -475,25 +475,36 @@ fn paste_text(app: tauri::AppHandle, window: tauri::Window, text: String) -> Res
         restore_previous_app(pid);
     }
 
-    // Brief pause so focus transfer completes before we write to the clipboard
-    // and simulate the keystroke.
-    std::thread::sleep(std::time::Duration::from_millis(80));
+    // Pause so focus transfer completes before we touch the clipboard.
+    std::thread::sleep(std::time::Duration::from_millis(100));
 
     // 3. Write text to clipboard
     write_clipboard_text(&text)?;
 
-    // 4. Simulate paste keystroke
-    use enigo::{Direction, Enigo, Key, Keyboard, Settings};
-    let mut enigo = Enigo::new(&Settings::default()).map_err(|e| e.to_string())?;
+    // Small gap so the clipboard write is visible to the target app.
+    std::thread::sleep(std::time::Duration::from_millis(30));
 
+    // 4. Simulate paste keystroke
     #[cfg(target_os = "macos")]
     {
-        enigo.key(Key::Meta, Direction::Press).map_err(|e| e.to_string())?;
-        enigo.key(Key::Unicode('v'), Direction::Click).map_err(|e| e.to_string())?;
-        enigo.key(Key::Meta, Direction::Release).map_err(|e| e.to_string())?;
+        use core_graphics::event::{CGEvent, CGEventFlags, CGKeyCode};
+        use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
+        const VK_V: CGKeyCode = 0x09;
+        let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState)
+            .map_err(|_| "Failed to create CGEventSource")?;
+        let key_down = CGEvent::new_keyboard_event(source.clone(), VK_V, true)
+            .map_err(|_| "Failed to create key-down event")?;
+        key_down.set_flags(CGEventFlags::CGEventFlagCommand);
+        key_down.post(core_graphics::event::CGEventTapLocation::HID);
+        let key_up = CGEvent::new_keyboard_event(source, VK_V, false)
+            .map_err(|_| "Failed to create key-up event")?;
+        key_up.set_flags(CGEventFlags::CGEventFlagCommand);
+        key_up.post(core_graphics::event::CGEventTapLocation::HID);
     }
     #[cfg(not(target_os = "macos"))]
     {
+        use enigo::{Direction, Enigo, Key, Keyboard, Settings};
+        let mut enigo = Enigo::new(&Settings::default()).map_err(|e| e.to_string())?;
         enigo.key(Key::Control, Direction::Press).map_err(|e| e.to_string())?;
         enigo.key(Key::Unicode('v'), Direction::Click).map_err(|e| e.to_string())?;
         enigo.key(Key::Control, Direction::Release).map_err(|e| e.to_string())?;
