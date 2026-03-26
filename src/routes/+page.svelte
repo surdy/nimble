@@ -81,6 +81,7 @@
   // List expansion state — populated when input exactly matches a static_list phrase
   let listItems = $state<ListItem[]>([]);
   let activeListCmd = $state<Command | null>(null);
+  let dynamicListLoaded = $state(false); // true once a dynamic_list invoke has resolved
   let resultsEl: HTMLDivElement | undefined = $state();
 
   // ── Filtering & navigation ─────────────────────────────────────────────
@@ -160,9 +161,14 @@
   // Combined results: built-ins first, then YAML commands
   const allFiltered = $derived([...filteredBuiltins, ...filtered]);
 
-  // True when the typed input exactly equals a static_list command phrase.
-  // In this mode we show list items instead of the normal results list.
-  const showingList = $derived(activeListCmd !== null && listItems.length > 0);
+  // True when the typed input matches a list command and we should show list UI.
+  // Includes the empty-resolved state for dynamic lists ("No results" feedback).
+  const showingList = $derived(
+    activeListCmd !== null && (
+      listItems.length > 0 ||
+      (activeListCmd.action.type === "dynamic_list" && dynamicListLoaded)
+    )
+  );
 
   let selectedIndex = $state(0);
 
@@ -219,43 +225,38 @@
 
       const commandDir = dynMatch.source_dir;
 
+      const runDynamic = (arg: string | null) => {
+        dynamicListLoaded = false;
+        invoke<ListItem[]>("run_dynamic_list", { commandDir, scriptName: config.script, arg, context: activeContext, phrase: dynMatch.phrase, inlineEnv: dynMatch.env })
+          .then(items => { listItems = items; selectedIndex = 0; dynamicListLoaded = true; })
+          .catch(() => { listItems = []; dynamicListLoaded = true; });
+      };
+
       if (argMode === "none") {
         if (isExact) {
           activeListCmd = dynMatch;
-          invoke<ListItem[]>("run_dynamic_list", { commandDir, scriptName: config.script, arg: null, context: activeContext, phrase: dynMatch.phrase, inlineEnv: dynMatch.env })
-            .then(items => { listItems = items; selectedIndex = 0; })
-            .catch(() => { listItems = []; });
+          runDynamic(null);
         } else {
           activeListCmd = null;
           listItems = [];
+          dynamicListLoaded = false;
         }
       } else if (argMode === "optional") {
         activeListCmd = dynMatch;
         if (isExact) {
-          // Immediate invocation — no suffix
-          invoke<ListItem[]>("run_dynamic_list", { commandDir, scriptName: config.script, arg: null, context: activeContext, phrase: dynMatch.phrase, inlineEnv: dynMatch.env })
-            .then(items => { listItems = items; selectedIndex = 0; })
-            .catch(() => { listItems = []; });
+          runDynamic(null);
         } else {
-          // Suffix present — debounce re-invocation
-          timer = setTimeout(() => {
-            invoke<ListItem[]>("run_dynamic_list", { commandDir, scriptName: config.script, arg: suffix, context: activeContext, phrase: dynMatch.phrase, inlineEnv: dynMatch.env })
-              .then(items => { listItems = items; selectedIndex = 0; })
-              .catch(() => { listItems = []; });
-          }, 200);
+          timer = setTimeout(() => runDynamic(suffix), 200);
         }
       } else {
         // required: only invoke when suffix is non-empty
         if (suffix) {
           activeListCmd = dynMatch;
-          timer = setTimeout(() => {
-            invoke<ListItem[]>("run_dynamic_list", { commandDir, scriptName: config.script, arg: suffix, context: activeContext, phrase: dynMatch.phrase, inlineEnv: dynMatch.env })
-              .then(items => { listItems = items; selectedIndex = 0; })
-              .catch(() => { listItems = []; });
-          }, 200);
+          timer = setTimeout(() => runDynamic(suffix), 200);
         } else {
           activeListCmd = null;
           listItems = [];
+          dynamicListLoaded = false;
         }
       }
 
@@ -265,6 +266,7 @@
     // No list match
     activeListCmd = null;
     listItems = [];
+    dynamicListLoaded = false;
   });
 
   // Resize window to fit current results (skip during onboarding)
@@ -273,8 +275,9 @@
     const hasQuery = input.trim() !== "";
     const WARNING_H = 40;
     const warnExtra = warningVisible ? WARNING_H : 0;
+    const listRowCount = showingList ? (listItems.length > 0 ? Math.min(listItems.length, MAX_RESULTS) : 1) : 0;
     const contentHeight = !hasQuery ? 0
-      : showingList ? Math.min(listItems.length, MAX_RESULTS) * ROW_H
+      : showingList ? listRowCount * ROW_H
       : allFiltered.length === 0 ? 44          // "no results" row
       : Math.min(allFiltered.length, MAX_RESULTS) * ROW_H;
     appWindow.setSize(new LogicalSize(640, 64 + warnExtra + contentHeight));
@@ -659,24 +662,28 @@
     {#if input.trim() !== ""}
       <div class="results" bind:this={resultsEl}>
         {#if showingList}
-          {#each listItems as item, i}
-            <!-- svelte-ignore a11y_no_static_element_interactions -->
-            <!-- svelte-ignore a11y_click_events_have_key_events -->
-            <div
-              class="result-row"
-              class:selected={i === selectedIndex}
-              onmouseenter={() => (selectedIndex = i)}
-              onmousedown={(e) => { e.preventDefault(); selectedIndex = i; }}
-              onclick={() => executeListItem(item)}
-            >
-              <div class="result-content">
-                <span class="result-title">{item.title}</span>
-                {#if item.subtext}
-                  <span class="result-subtext">{item.subtext}</span>
-                {/if}
+          {#if listItems.length === 0}
+            <div class="no-results">No results</div>
+          {:else}
+            {#each listItems as item, i}
+              <!-- svelte-ignore a11y_no_static_element_interactions -->
+              <!-- svelte-ignore a11y_click_events_have_key_events -->
+              <div
+                class="result-row"
+                class:selected={i === selectedIndex}
+                onmouseenter={() => (selectedIndex = i)}
+                onmousedown={(e) => { e.preventDefault(); selectedIndex = i; }}
+                onclick={() => executeListItem(item)}
+              >
+                <div class="result-content">
+                  <span class="result-title">{item.title}</span>
+                  {#if item.subtext}
+                    <span class="result-subtext">{item.subtext}</span>
+                  {/if}
+                </div>
               </div>
-            </div>
-          {/each}
+            {/each}
+          {/if}
         {:else if allFiltered.length === 0}
           <div class="no-results">No results</div>
         {:else}
@@ -732,15 +739,14 @@
 
   /* ── Launcher bar ────────────────────────────────────────────────────── */
   .launcher {
-    background: rgba(28, 28, 30, 0.82);
+    background: rgba(28, 28, 30, 0.92);
     -webkit-backdrop-filter: blur(40px) saturate(1.8);
     backdrop-filter: blur(40px) saturate(1.8);
+    border: 1.5px solid rgba(255,255,255,.45);
     border-radius: 12px;
     box-shadow:
-      0 0 0 1px rgba(255,255,255,.1),
-      0 1px 3px rgba(0,0,0,.2),
-      0 8px 24px rgba(0,0,0,.35),
-      0 24px 64px rgba(0,0,0,.5);
+      0 8px 32px rgba(0,0,0,.5),
+      0 24px 64px rgba(0,0,0,.4);
     overflow: hidden;
   }
 
@@ -965,7 +971,7 @@
 
   .no-results {
     padding: 12px 16px;
-    color: rgba(245,245,247,.3);
+    color: rgba(245,245,247,.5);
     font-size: 13px;
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
     text-align: center;

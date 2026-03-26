@@ -5,6 +5,14 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [0.3.0] — 2026-03-25
+
+### Added
+- **Empty dynamic list feedback** — when a `dynamic_list` script returns zero items, the launcher now displays a "No results" row instead of silently collapsing; a loading guard prevents the message from flashing while the script is still running
+
+### Changed
+- **Launcher border visibility** — switched to a 1.5px solid white border (45% opacity) and increased background opacity to 0.92 for better contrast on dark desktops
+
 ## [0.2.1] — 2026-03-25
 
 ### Changed
