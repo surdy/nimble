@@ -539,6 +539,33 @@ pub fn run() {
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
 
+            // macOS: prompt for Accessibility permission if not already granted.
+            // CGEvent keystroke simulation (used by paste_text) silently fails
+            // without this.  The check is per code-signature, so a new version
+            // installed via brew may need the user to re-grant permission.
+            #[cfg(target_os = "macos")]
+            {
+                use core_foundation::base::TCFType;
+                use core_foundation::boolean::CFBoolean;
+                use core_foundation::dictionary::CFDictionary;
+                use core_foundation::string::CFString;
+                extern "C" {
+                    static kAXTrustedCheckOptionPrompt: core_foundation::string::CFStringRef;
+                    fn AXIsProcessTrustedWithOptions(
+                        options: core_foundation::base::CFTypeRef,
+                    ) -> bool;
+                }
+                unsafe {
+                    let key = CFString::wrap_under_get_rule(kAXTrustedCheckOptionPrompt as _);
+                    let value = CFBoolean::true_value();
+                    let options = CFDictionary::from_CFType_pairs(&[(
+                        key.as_CFType(),
+                        value.as_CFType(),
+                    )]);
+                    AXIsProcessTrustedWithOptions(options.as_concrete_TypeRef() as _);
+                }
+            }
+
             // Build system tray menu
             let version = app.package_info().version.to_string();
             let app_info = MenuItem::new(

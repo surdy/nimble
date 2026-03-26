@@ -5,6 +5,12 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [0.5.1] — 2026-03-26
+
+### Fixed
+- **Accessibility permission prompt on macOS** — the app now calls `AXIsProcessTrustedWithOptions` on startup to trigger the system Accessibility permission dialog if not already granted; previously CGEvent paste simulation silently failed after brew upgrades changed the code signature
+- **Release tag push** — updated release prompt to push tags explicitly instead of relying on `--follow-tags` which silently skips lightweight tags
+
 ## [0.5.0] — 2026-03-26
 
 ### Fixed
