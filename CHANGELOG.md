@@ -5,6 +5,11 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [0.4.0] — 2026-03-25
+
+### Changed
+- **Context no longer appended to parameters** — when the user types a command phrase plus trailing text (a parameter), the active context is no longer appended to the effective input; parameters now contain only what the user explicitly typed. Scripts can still read the context via `NIMBLE_CONTEXT` env var.
+
 ## [0.3.0] — 2026-03-25
 
 ### Added

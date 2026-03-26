@@ -105,10 +105,20 @@
 
   // When a context is active and the user is not typing a / command, append
   // the context to raw input so commands are matched against the full phrase.
-  // Requires non-empty raw input: an empty input must always produce no results,
-  // regardless of context, to avoid unexpected matches on launcher open.
+  // However, if the raw input already places us in "param mode" for a known
+  // command (i.e. the user typed the full phrase + extra text), do NOT append
+  // context — the trailing text is a user-supplied parameter, not a phrase
+  // fragment.  Scripts can still read the context via NIMBLE_CONTEXT env var.
+  const rawInParamMode = $derived(
+    (() => {
+      const raw = input.trim().toLowerCase();
+      if (raw === "" || raw.startsWith("/")) return false;
+      return commands.some(cmd => raw.startsWith(cmd.phrase.toLowerCase() + " "));
+    })()
+  );
+
   const effectiveInput = $derived(
-    activeContext && input.trim() !== "" && !input.trim().startsWith("/")
+    activeContext && input.trim() !== "" && !input.trim().startsWith("/") && !rawInParamMode
       ? input.trim() + " " + activeContext
       : input.trim()
   );
@@ -385,7 +395,8 @@
   async function executeCommand(cmd: Command) {
     if (cmd.action.type === "open_url") {
       // Extract any text typed after the command phrase as the param.
-      // Use effectiveInput so the context suffix can serve as the {param} value.
+      // effectiveInput includes context only when no param is present,
+      // so params are never polluted by the active context.
       const phrase = cmd.phrase.toLowerCase();
       const typed  = effectiveInput;
       const after  = typed.toLowerCase().startsWith(phrase)
@@ -409,7 +420,8 @@
     } else if (cmd.action.type === "script_action") {
       const cfg = cmd.action.config;
       const phrase = cmd.phrase.toLowerCase();
-      // Use effectiveInput so the context suffix is included in the suffix arg.
+      // effectiveInput excludes context when a param is present,
+      // so script args contain only what the user explicitly typed.
       const typed  = effectiveInput;
       const after  = typed.toLowerCase().startsWith(phrase)
         ? typed.slice(phrase.length).trim()

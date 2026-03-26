@@ -8,7 +8,7 @@
 # Last updated: 2026-03-25
 # Spec version: 2
 
-spec_version: 3
+spec_version: 4
 
 # ── Config directory locations ──────────────────────────────────────────
 config_dirs:
@@ -352,7 +352,7 @@ contexts:
   description: >
     A context is a word/phrase silently appended to every typed command,
     narrowing matching to a particular topic.
-  matching_rule: "effective input = raw input + ' ' + context"
+  matching_rule: "effective input = raw input + ' ' + context (unless raw input is already in param mode for a known command, in which case context is not appended)"
   builtin_commands:
     - command: "/ctx set <value>"
       description: "Sets the active context."
@@ -362,6 +362,7 @@ contexts:
     - "Phrases starting with / are reserved for built-in commands."
     - "Context is invisible in the input bar — only matching is affected."
     - "When no context is set, the launcher behaves as usual."
+    - "When the user types a command phrase + extra text (parameter), context is not appended to avoid polluting params. Scripts can read context via NIMBLE_CONTEXT env var."
 
 # ── Settings schema ────────────────────────────────────────────────────
 settings_schema:
@@ -441,3 +442,7 @@ changelog:
     date: "2026-03-25"
     changes:
       - "Added longest-phrase-wins matching rule for param-mode conflicts."
+  - version: 4
+    date: "2026-03-25"
+    changes:
+      - "Context is no longer appended when raw input is in param mode for a known command."
