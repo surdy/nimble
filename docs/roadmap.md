@@ -27,6 +27,8 @@
 - [x] `settings.yaml` — human-editable file for hotkey, context chip visibility, and dedup behaviour
 - [x] Example config — `example-config/` directory in the repo covering every action type
 - [x] Rust test suite — 56 unit tests covering YAML parsing, dedup, URL validation, script sandboxing
+- [x] External context API — `state.json` for reading the active context + `nimble://` deep links for setting/resetting context from other apps
+- [x] Context persistence — active context survives app restarts via `state.json`
 
 ---
 

@@ -173,3 +173,9 @@ If you then type `search google advanced types`, the parameter `"advanced types"
 ```
 
 All commands go back to matching against raw input only.
+
+---
+
+## External access
+
+Other applications can read and write the active context without interacting with the launcher window. See [External Context API](external-context.md) for details on the `state.json` file and `nimble://` deep links.

@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 use tauri::{
     menu::{Menu, MenuItem, PredefinedMenuItem},
     tray::TrayIconBuilder,
-    Manager,
+    Emitter, Listener, Manager,
 };
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 use tauri_plugin_opener::OpenerExt;
@@ -185,6 +185,108 @@ pub(crate) fn validate_text(text: &str) -> Result<(), String> {
     Ok(())
 }
 
+// ── State file helpers ─────────────────────────────────────────────────────────
+
+/// Read the active context from `state.json` inside `config_dir`.
+/// Returns an empty string when the file is absent or unreadable.
+pub(crate) fn read_context_from_state(config_dir: &std::path::Path) -> String {
+    let path = config_dir.join("state.json");
+    let content = match std::fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(_) => return String::new(),
+    };
+    let val: serde_json::Value = match serde_json::from_str(&content) {
+        Ok(v) => v,
+        Err(_) => return String::new(),
+    };
+    val.get("context")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string()
+}
+
+/// Write the active context to `state.json` inside `config_dir`.
+/// Creates the file if absent; overwrites if present.
+pub(crate) fn write_context_to_state(
+    config_dir: &std::path::Path,
+    context: &str,
+) -> Result<(), String> {
+    let path = config_dir.join("state.json");
+    let json = serde_json::json!({ "context": context });
+    let content = serde_json::to_string_pretty(&json).map_err(|e| e.to_string())?;
+    std::fs::write(&path, content).map_err(|e| e.to_string())
+}
+
+// ── Deep-link URL parsing ──────────────────────────────────────────────────────
+
+/// Parsed deep-link action from a `nimble://` URL.
+#[derive(Debug, PartialEq)]
+pub(crate) enum DeepLinkAction {
+    /// Set context to the given value.
+    CtxSet(String),
+    /// Reset (clear) the active context.
+    CtxReset,
+}
+
+/// Parse a `nimble://` URL into a `DeepLinkAction`.
+/// Returns `None` for unrecognised paths.
+///
+/// Supported routes:
+///   nimble://ctx/set/<value>
+///   nimble://ctx/reset
+pub(crate) fn parse_deep_link(url: &str) -> Option<DeepLinkAction> {
+    // Strip the scheme. Accept both nimble:// and nimble:/// (some OS launchers add triple slash).
+    let path = url
+        .strip_prefix("nimble:///")
+        .or_else(|| url.strip_prefix("nimble://"))?;
+
+    if let Some(value) = path.strip_prefix("ctx/set/") {
+        let decoded = percent_decode(value);
+        let trimmed = decoded.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+        Some(DeepLinkAction::CtxSet(trimmed.to_string()))
+    } else if path == "ctx/reset" || path == "ctx/reset/" {
+        Some(DeepLinkAction::CtxReset)
+    } else {
+        None
+    }
+}
+
+/// Minimal percent-decoding for deep-link values.
+/// Handles `%XX` sequences and `+` as space.
+fn percent_decode(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut chars = input.bytes();
+    while let Some(b) = chars.next() {
+        match b {
+            b'%' => {
+                let hi = chars.next();
+                let lo = chars.next();
+                if let (Some(h), Some(l)) = (hi, lo) {
+                    if let Ok(byte) = u8::from_str_radix(
+                        &format!("{}{}", h as char, l as char),
+                        16,
+                    ) {
+                        out.push(byte as char);
+                    } else {
+                        // Malformed: pass through literally
+                        out.push('%');
+                        out.push(h as char);
+                        out.push(l as char);
+                    }
+                } else {
+                    out.push('%');
+                }
+            }
+            b'+' => out.push(' '),
+            _ => out.push(b as char),
+        }
+    }
+    out
+}
+
 // ── Clipboard helper ───────────────────────────────────────────────────────────
 
 /// Write `text` to the system clipboard.
@@ -287,6 +389,21 @@ fn save_hotkey(app: tauri::AppHandle, hotkey: String) -> Result<(), String> {
     let mut state = binding.0.lock().unwrap();
     state.hotkey = Some(hotkey);
     settings::save(&config_dir, &state)
+}
+
+/// Save the active context to `state.json` in the config directory.
+#[tauri::command]
+fn save_context(app: tauri::AppHandle, context: String) -> Result<(), String> {
+    let config_dir = app.path().app_config_dir().map_err(|e| e.to_string())?;
+    write_context_to_state(&config_dir, &context)
+}
+
+/// Load the active context from `state.json` in the config directory.
+/// Returns an empty string if no context has been persisted.
+#[tauri::command]
+fn load_context(app: tauri::AppHandle) -> String {
+    let config_dir = app.path().app_config_dir().unwrap_or_default();
+    read_context_from_state(&config_dir)
 }
 
 /// Return the full list of commands loaded from the user config directory,
@@ -534,6 +651,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
+        .plugin(tauri_plugin_deep_link::init())
         .setup(|app| {
             // macOS: hide from Dock and Cmd+Tab app switcher
             #[cfg(target_os = "macos")]
@@ -605,6 +723,40 @@ pub fn run() {
             // Start watching the commands subdirectory for live command reloads
             watcher::start(app.handle().clone(), config_dir.join("commands"), allow_duplicates);
 
+            // Listen for incoming deep-link URLs (nimble://...) and route them.
+            // Currently supports: nimble://ctx/set/<value> and nimble://ctx/reset.
+            // When a recognised link arrives we update state.json and emit a
+            // frontend event so the UI reflects the change immediately.
+            let dl_handle = app.handle().clone();
+            app.listen("deep-link://new-url", move |event| {
+                let raw = event.payload();
+                if let Ok(urls) = serde_json::from_str::<Vec<String>>(raw) {
+                    for url in urls {
+                        if let Some(action) = parse_deep_link(&url) {
+                            let cfg = dl_handle.path().app_config_dir().ok();
+                            match action {
+                                DeepLinkAction::CtxSet(ref value) => {
+                                    if let Some(ref dir) = cfg {
+                                        let _ = write_context_to_state(dir, value);
+                                    }
+                                    dl_handle
+                                        .emit("context://changed", value.clone())
+                                        .ok();
+                                }
+                                DeepLinkAction::CtxReset => {
+                                    if let Some(ref dir) = cfg {
+                                        let _ = write_context_to_state(dir, "");
+                                    }
+                                    dl_handle
+                                        .emit("context://changed", "".to_string())
+                                        .ok();
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+
             // Load monochrome tray icon for macOS template rendering.
             // The @2x variant is embedded at compile time for crisp Retina display.
             // Falls back to the default app icon if decoding fails.
@@ -652,7 +804,7 @@ pub fn run() {
 
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![hide_window, show_window, dismiss_launcher, register_shortcut, get_settings, save_hotkey, list_commands, load_list, run_dynamic_list, run_script_action, open_url, paste_text, copy_text])
+        .invoke_handler(tauri::generate_handler![hide_window, show_window, dismiss_launcher, register_shortcut, get_settings, save_hotkey, save_context, load_context, list_commands, load_list, run_dynamic_list, run_script_action, open_url, paste_text, copy_text])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
@@ -742,5 +894,124 @@ mod tests {
     #[test]
     fn empty_string_accepted() {
         assert!(validate_text("").is_ok());
+    }
+
+    // ── read_context_from_state / write_context_to_state ───────────────────────
+
+    #[test]
+    fn state_roundtrip() {
+        let dir = tempfile::TempDir::new().unwrap();
+        write_context_to_state(dir.path(), "reddit").unwrap();
+        assert_eq!(read_context_from_state(dir.path()), "reddit");
+    }
+
+    #[test]
+    fn state_missing_file_returns_empty() {
+        let dir = tempfile::TempDir::new().unwrap();
+        assert_eq!(read_context_from_state(dir.path()), "");
+    }
+
+    #[test]
+    fn state_empty_context_persists() {
+        let dir = tempfile::TempDir::new().unwrap();
+        write_context_to_state(dir.path(), "foo").unwrap();
+        write_context_to_state(dir.path(), "").unwrap();
+        assert_eq!(read_context_from_state(dir.path()), "");
+    }
+
+    #[test]
+    fn state_malformed_json_returns_empty() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(dir.path().join("state.json"), "not json").unwrap();
+        assert_eq!(read_context_from_state(dir.path()), "");
+    }
+
+    #[test]
+    fn state_missing_context_key_returns_empty() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(dir.path().join("state.json"), r#"{"other":"val"}"#).unwrap();
+        assert_eq!(read_context_from_state(dir.path()), "");
+    }
+
+    // ── parse_deep_link ────────────────────────────────────────────────────────
+
+    #[test]
+    fn deep_link_ctx_set() {
+        assert_eq!(
+            parse_deep_link("nimble://ctx/set/reddit"),
+            Some(DeepLinkAction::CtxSet("reddit".into()))
+        );
+    }
+
+    #[test]
+    fn deep_link_ctx_set_with_spaces() {
+        assert_eq!(
+            parse_deep_link("nimble://ctx/set/my%20project"),
+            Some(DeepLinkAction::CtxSet("my project".into()))
+        );
+    }
+
+    #[test]
+    fn deep_link_ctx_set_plus_as_space() {
+        assert_eq!(
+            parse_deep_link("nimble://ctx/set/hello+world"),
+            Some(DeepLinkAction::CtxSet("hello world".into()))
+        );
+    }
+
+    #[test]
+    fn deep_link_ctx_set_empty_value_returns_none() {
+        assert_eq!(parse_deep_link("nimble://ctx/set/"), None);
+    }
+
+    #[test]
+    fn deep_link_ctx_reset() {
+        assert_eq!(
+            parse_deep_link("nimble://ctx/reset"),
+            Some(DeepLinkAction::CtxReset)
+        );
+    }
+
+    #[test]
+    fn deep_link_ctx_reset_trailing_slash() {
+        assert_eq!(
+            parse_deep_link("nimble://ctx/reset/"),
+            Some(DeepLinkAction::CtxReset)
+        );
+    }
+
+    #[test]
+    fn deep_link_triple_slash() {
+        assert_eq!(
+            parse_deep_link("nimble:///ctx/set/work"),
+            Some(DeepLinkAction::CtxSet("work".into()))
+        );
+    }
+
+    #[test]
+    fn deep_link_unknown_route_returns_none() {
+        assert_eq!(parse_deep_link("nimble://unknown/path"), None);
+    }
+
+    #[test]
+    fn deep_link_wrong_scheme_returns_none() {
+        assert_eq!(parse_deep_link("https://ctx/set/reddit"), None);
+    }
+
+    // ── percent_decode ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn percent_decode_basic() {
+        assert_eq!(percent_decode("hello%20world"), "hello world");
+    }
+
+    #[test]
+    fn percent_decode_plus_to_space() {
+        assert_eq!(percent_decode("a+b"), "a b");
+    }
+
+    #[test]
+    fn percent_decode_passthrough() {
+        assert_eq!(percent_decode("plain"), "plain");
     }
 }

@@ -512,15 +512,16 @@
     }
   }
 
-  // Persist active context to localStorage.
+  // Persist active context to state.json via the backend.
   $effect(() => {
-    localStorage.setItem("ctx_active_context", activeContext);
+    invoke("save_context", { context: activeContext }).catch(() => {});
   });
 
   // ── Lifecycle ─────────────────────────────────────────────────────────
   onMount(() => {
     let unlistenFocus: (() => void) | null = null;
     let unlistenReload: (() => void) | null = null;
+    let unlistenDeepLink: (() => void) | null = null;
 
     (async () => {
       // Load settings from the backend (settings.yaml)
@@ -529,8 +530,8 @@
       );
       showContextChip = appSettings.show_context_chip;
 
-      // Restore active context from the previous session.
-      const savedContext = localStorage.getItem("ctx_active_context");
+      // Restore active context from state.json (persisted by the backend).
+      const savedContext = await invoke<string>("load_context").catch(() => "");
       if (savedContext) activeContext = savedContext;
 
       // One-time migration: if the backend has no hotkey saved yet, check
@@ -596,11 +597,16 @@
             .catch(() => { listItems = []; });
         }
       });
+      // Deep-link: backend emits this event when nimble://ctx/... is opened
+      unlistenDeepLink = await listen<string>("context://changed", (event) => {
+        activeContext = event.payload;
+      });
     })();
 
     return () => {
       unlistenFocus?.();
       unlistenReload?.();
+      unlistenDeepLink?.();
     };
   });
 </script>

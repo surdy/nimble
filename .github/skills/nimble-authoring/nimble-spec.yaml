@@ -8,7 +8,7 @@
 # Last updated: 2026-03-25
 # Spec version: 2
 
-spec_version: 4
+spec_version: 5
 
 # ── Config directory locations ──────────────────────────────────────────
 config_dirs:
@@ -19,6 +19,7 @@ config_dirs:
 config_structure:
   settings.yaml: "Application settings (hotkey, show_context_chip, etc.)"
   env.yaml: "Global user-defined environment variables for scripts"
+  state.json: "Runtime state file (active context); written automatically by Nimble"
   commands/: "Directory tree of command YAML files (any nesting depth)"
 
 # ── Command YAML schema ────────────────────────────────────────────────
@@ -358,11 +359,31 @@ contexts:
       description: "Sets the active context."
     - command: "/ctx reset"
       description: "Clears the active context."
+  persistence:
+    file: state.json
+    location: "Config root directory"
+    format: '{"context": "<value>"}'
+    notes:
+      - "Written on every context change (set, reset, deep link, chip clear)."
+      - "Read on app startup to restore previous context."
+      - "External tools can read this file to query the active context."
+  deep_links:
+    scheme: nimble
+    routes:
+      - url: "nimble://ctx/set/<value>"
+        description: "Set the active context to <value>. Percent-encoded. + = space."
+      - url: "nimble://ctx/reset"
+        description: "Clear the active context."
+    notes:
+      - "Deep links are fire-and-forget — no response channel."
+      - "The app updates state.json and emits a frontend event upon receiving a link."
   design_notes:
     - "Phrases starting with / are reserved for built-in commands."
     - "Context is invisible in the input bar — only matching is affected."
     - "When no context is set, the launcher behaves as usual."
     - "When the user types a command phrase + extra text (parameter), context is not appended to avoid polluting params. Scripts can read context via NIMBLE_CONTEXT env var."
+    - "Context persists across app restarts via state.json."
+    - "External apps can read state.json and write via nimble:// deep links."
 
 # ── Settings schema ────────────────────────────────────────────────────
 settings_schema:
@@ -446,3 +467,9 @@ changelog:
     date: "2026-03-25"
     changes:
       - "Context is no longer appended when raw input is in param mode for a known command."
+  - version: 5
+    date: "2026-04-02"
+    changes:
+      - "Added state.json to config_structure for runtime context persistence."
+      - "Added deep_links section under contexts with nimble:// URL scheme routes."
+      - "Added persistence section under contexts describing state.json format and behaviour."

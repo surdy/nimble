@@ -5,6 +5,18 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [0.6.0] — 2026-04-02
+
+### Added
+- **External context API** — active context is now exposed via `state.json` (read) and `nimble://` deep links (write); other apps can query or set the context without interacting with the launcher window
+- **Context persistence** — active context survives app restarts; backed by `state.json` in the config directory (replaces localStorage)
+- **Deep link support** — registered `nimble://` URL scheme via `tauri-plugin-deep-link`; supports `nimble://ctx/set/<value>` and `nimble://ctx/reset`
+- **macOS code signing & notarization** — CI now signs and notarizes the DMG using Apple Developer certificates; entitlements plist added for hardened runtime
+
+### Changed
+- **App icon refresh** — adopted Feathered Prompt as the canonical app icon; regenerated all platform icon assets
+- **Monochrome tray icon** — new template-mode tray icon for macOS with enlarged arrow glyph
+
 ## [0.5.1] — 2026-03-26
 
 ### Fixed
