@@ -98,7 +98,7 @@ After the shortcut is set the launcher is ready to use. Out of the box, Nimble s
 To create your own command, open your `commands/` directory:
 
 ```
-~/Library/Application Support/Nimble/commands/
+~/Library/Application Support/nimble/commands/
 ```
 
 Create a file — for example `open-github.yaml` — with this content:

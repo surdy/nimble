@@ -10,12 +10,12 @@ For the overall config directory layout see [Config Directory Structure](../refe
 
 | Platform | Path |
 |----------|------|
-| macOS | `~/Library/Application Support/Nimble/commands/` |
-| Linux | `$XDG_CONFIG_HOME/Nimble/commands/` (falls back to `~/.config/Nimble/commands/`) |
-| Windows | `%APPDATA%\Nimble\commands\` |
+| macOS | `~/Library/Application Support/nimble/commands/` |
+| Linux | `$XDG_CONFIG_HOME/nimble/commands/` (falls back to `~/.config/nimble/commands/`) |
+| Windows | `%APPDATA%\nimble\commands\` |
 
 > **Tip:** open a new command file in your editor directly from shell:  
-> `code ~/Library/Application\ Support/Nimble/commands/my-command.yaml`
+> `code ~/Library/Application\ Support/nimble/commands/my-command.yaml`
 
 ---
 

@@ -4,7 +4,7 @@ This directory mirrors the layout of the Nimble config directory on disk. Copy i
 
 **Config directory location (macOS):**
 ```
-~/Library/Application Support/Nimble/
+~/Library/Application Support/nimble/
 ```
 
 ## Structure

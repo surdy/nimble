@@ -112,7 +112,7 @@ Without this, paste commands write to the clipboard but skip the keystroke simul
 Once Nimble is running and your shortcut is set, open the commands directory and create a file:
 
 ```
-~/Library/Application Support/Nimble/commands/open-github.yaml
+~/Library/Application Support/nimble/commands/open-github.yaml
 ```
 
 ```yaml

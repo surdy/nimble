@@ -287,6 +287,35 @@ fn percent_decode(input: &str) -> String {
     out
 }
 
+// ── One-time config dir migration ───────────────────────────────────────────
+
+/// Migrate the config directory from the old reverse-DNS identifier
+/// (`io.switchpanel.nimble`) to the new short identifier (`nimble`).
+/// If the old directory exists and the new one does not, all contents
+/// are moved. If both exist the migration is skipped (user may have
+/// manually created the new dir).
+fn migrate_config_dir(new_dir: &std::path::Path) {
+    let old_name = "io.switchpanel.nimble";
+    // The new config dir's parent is the platform app-support root.
+    let Some(parent) = new_dir.parent() else { return };
+    let old_dir = parent.join(old_name);
+    if old_dir.exists() && !new_dir.exists() {
+        if let Err(e) = std::fs::rename(&old_dir, new_dir) {
+            eprintln!(
+                "[nimble] config migration failed ({} → {}): {e}",
+                old_dir.display(),
+                new_dir.display()
+            );
+        } else {
+            eprintln!(
+                "[nimble] migrated config dir: {} → {}",
+                old_dir.display(),
+                new_dir.display()
+            );
+        }
+    }
+}
+
 // ── Clipboard helper ───────────────────────────────────────────────────────────
 
 /// Write `text` to the system clipboard.
@@ -708,6 +737,7 @@ pub fn run() {
             // The hotkey (if set) is registered here so it is active immediately
             // on startup without waiting for the frontend to load.
             let config_dir = app.path().app_config_dir().map_err(|e| e.to_string())?;
+            migrate_config_dir(&config_dir);
             let loaded_settings = settings::load(&config_dir);
             if let Some(ref hotkey) = loaded_settings.hotkey {
                 if let Err(e) = do_register_shortcut(app.handle(), hotkey) {

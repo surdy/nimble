@@ -5,6 +5,15 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [0.7.0] — 2026-04-03
+
+### Changed
+- **Simplified config directory path** — changed Tauri identifier from `io.switchpanel.nimble` to `nimble`; config directory is now `~/Library/Application Support/nimble/` (macOS), `~/.config/nimble/` (Linux), `%APPDATA%\nimble\` (Windows)
+- **One-time config migration** — existing installs automatically rename the old `io.switchpanel.nimble/` directory to `nimble/` on first launch
+
+### Added
+- **Environment variables reference** — new `docs/reference/environment-variables.md` page documenting all six built-in `NIMBLE_*` variables, `${VAR}` substitution, and user-defined env precedence
+
 ## [0.6.0] — 2026-04-02
 
 ### Added
@@ -15,7 +24,6 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 - **App icon refresh** — adopted Feathered Prompt as the canonical app icon; regenerated all platform icon assets
-- **Monochrome tray icon** — new template-mode tray icon for macOS with enlarged arrow glyph
 
 ## [0.5.1] — 2026-03-26
 

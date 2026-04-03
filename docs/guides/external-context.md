@@ -13,9 +13,9 @@ Whenever the context changes (via `/ctx set`, `/ctx reset`, the context chip, or
 
 | Platform | Path |
 |----------|------|
-| macOS    | `~/Library/Application Support/Nimble/state.json` |
-| Linux    | `~/.config/Nimble/state.json` |
-| Windows  | `%APPDATA%\Nimble\state.json` |
+| macOS    | `~/Library/Application Support/nimble/state.json` |
+| Linux    | `~/.config/nimble/state.json` |
+| Windows  | `%APPDATA%\nimble\state.json` |
 
 The file contains a single JSON object:
 
@@ -48,7 +48,7 @@ jq -r .context ~/Library/Application\ Support/Nimble/state.json
 ```python
 import json, pathlib
 
-state = pathlib.Path.home() / "Library/Application Support/Nimble/state.json"
+state = pathlib.Path.home() / "Library/Application Support/nimble/state.json"
 ctx = json.loads(state.read_text()).get("context", "")
 print(f"Active context: {ctx!r}")
 ```

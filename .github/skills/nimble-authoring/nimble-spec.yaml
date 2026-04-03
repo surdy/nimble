@@ -8,13 +8,13 @@
 # Last updated: 2026-03-25
 # Spec version: 2
 
-spec_version: 5
+spec_version: 6
 
 # ── Config directory locations ──────────────────────────────────────────
 config_dirs:
-  macos: "~/Library/Application Support/io.switchpanel.nimble/"
-  linux: "$XDG_CONFIG_HOME/io.switchpanel.nimble/ (fallback: ~/.config/io.switchpanel.nimble/)"
-  windows: "%APPDATA%\\io.switchpanel.nimble\\"
+  macos: "~/Library/Application Support/nimble/"
+  linux: "$XDG_CONFIG_HOME/nimble/ (fallback: ~/.config/nimble/)"
+  windows: "%APPDATA%\\nimble\\"
 
 config_structure:
   settings.yaml: "Application settings (hotkey, show_context_chip, etc.)"
@@ -303,10 +303,10 @@ environment_variables:
         example: "search contacts"
       NIMBLE_CONFIG_DIR:
         description: "Absolute path to the Nimble config root directory."
-        example: "/Users/you/Library/Application Support/io.switchpanel.nimble"
+        example: "/Users/you/Library/Application Support/nimble"
       NIMBLE_COMMAND_DIR:
         description: "Absolute path to the directory containing the command YAML."
-        example: "/Users/you/Library/Application Support/io.switchpanel.nimble/commands/search-contacts"
+        example: "/Users/you/Library/Application Support/nimble/commands/search-contacts"
       NIMBLE_OS:
         description: "Operating system identifier."
         values: ["macos", "linux", "windows"]
@@ -321,7 +321,7 @@ environment_variables:
     precedence_layers:
       - layer: 1
         name: Global
-        location: "io.switchpanel.nimble/env.yaml (config root)"
+        location: "nimble/env.yaml (config root)"
         scope: "All commands"
       - layer: 2
         name: Sidecar
@@ -473,3 +473,9 @@ changelog:
       - "Added state.json to config_structure for runtime context persistence."
       - "Added deep_links section under contexts with nimble:// URL scheme routes."
       - "Added persistence section under contexts describing state.json format and behaviour."
+  - version: 6
+    date: "2026-04-03"
+    changes:
+      - "Config directory identifier changed from io.switchpanel.nimble to nimble."
+      - "All config_dirs paths updated to use short identifier."
+      - "One-time migration added for existing installs."

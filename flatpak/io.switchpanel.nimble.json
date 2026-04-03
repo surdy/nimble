@@ -11,7 +11,7 @@
     "--socket=wayland",
     "--share=network",
     "--device=dri",
-    "--filesystem=xdg-config/Nimble:create",
+    "--filesystem=xdg-config/nimble:create",
     "--talk-name=org.freedesktop.Notifications",
     "--talk-name=org.freedesktop.portal.Desktop"
   ],

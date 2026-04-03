@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Nimble",
-  "version": "0.6.0",
-  "identifier": "io.switchpanel.nimble",
+  "version": "0.7.0",
+  "identifier": "nimble",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",

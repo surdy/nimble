@@ -128,7 +128,7 @@ If the resolved path is absolute, it is used directly. If relative, it is resolv
 ### Example: shared scripts directory
 
 ```yaml
-# ~/Library/Application Support/Nimble/env.yaml
+# ~/Library/Application Support/nimble/env.yaml
 SHARED_SCRIPTS: /opt/team/scripts
 ```
 
@@ -161,7 +161,7 @@ action:
 If you want to restrict scripts and lists to their co-located directories only, set `allow_external_paths: false` in `settings.yaml`:
 
 ```yaml
-# ~/Library/Application Support/Nimble/settings.yaml
+# ~/Library/Application Support/nimble/settings.yaml
 allow_external_paths: false
 ```
 
@@ -197,8 +197,8 @@ Nimble injects a set of `NIMBLE_*` environment variables into every script it ru
 |----------|-------|--------|
 | `NIMBLE_CONTEXT` | Active context string (empty if none) | `reddit` |
 | `NIMBLE_PHRASE` | Command phrase that triggered this script | `search contacts` |
-| `NIMBLE_CONFIG_DIR` | Absolute path to the Nimble config root | `/Users/you/Library/Application Support/Nimble` |
-| `NIMBLE_COMMAND_DIR` | Absolute path to the directory containing the command YAML | `/Users/you/Library/Application Support/Nimble/commands/search-contacts` |
+| `NIMBLE_CONFIG_DIR` | Absolute path to the Nimble config root | `/Users/you/Library/Application Support/nimble` |
+| `NIMBLE_COMMAND_DIR` | Absolute path to the directory containing the command YAML | `/Users/you/Library/Application Support/nimble/commands/search-contacts` |
 | `NIMBLE_OS` | Operating system: `macos`, `linux`, or `windows` | `macos` |
 | `NIMBLE_VERSION` | Nimble app version | `0.1.0` |
 
@@ -252,7 +252,7 @@ Built-in `NIMBLE_*` variables always take precedence and cannot be overridden.
 Create `env.yaml` at the Nimble config root (alongside `settings.yaml`):
 
 ```yaml
-# ~/Library/Application Support/Nimble/env.yaml
+# ~/Library/Application Support/nimble/env.yaml
 WORK_EMAIL: alice@example.com
 JIRA_BASE_URL: https://mycompany.atlassian.net
 TEAM_SLACK_CHANNEL: C0123456789

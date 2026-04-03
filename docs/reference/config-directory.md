@@ -8,9 +8,9 @@ Nimble stores all per-user data in a single platform-specific config directory. 
 
 | Platform | Path |
 |----------|------|
-| macOS | `~/Library/Application Support/Nimble/` |
-| Linux | `$XDG_CONFIG_HOME/Nimble/` (falls back to `~/.config/Nimble/`) |
-| Windows | `%APPDATA%\Nimble\` |
+| macOS | `~/Library/Application Support/nimble/` |
+| Linux | `$XDG_CONFIG_HOME/nimble/` (falls back to `~/.config/nimble/`) |
+| Windows | `%APPDATA%\nimble\` |
 
 ---
 
@@ -64,7 +64,7 @@ allow_external_paths: true
 An optional file at the config root that defines **global user-defined environment variables** injected into every script run by `dynamic_list` or `script_action` commands.
 
 ```yaml
-# ~/Library/Application Support/Nimble/env.yaml
+# ~/Library/Application Support/nimble/env.yaml
 WORK_EMAIL: alice@example.com
 JIRA_BASE_URL: https://mycompany.atlassian.net
 ```
