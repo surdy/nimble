@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 fn default_true() -> bool {
     true
@@ -33,6 +33,13 @@ pub struct AppSettings {
     /// `false` — resolved paths must stay inside the command directory.
     #[serde(default = "default_true")]
     pub allow_external_paths: bool,
+
+    /// Optional custom path to the commands directory.
+    /// When set, Nimble loads commands from this absolute path instead of
+    /// `<config_root>/commands/`. The path must be absolute.
+    /// When absent, defaults to `<config_root>/commands/`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub commands_dir: Option<String>,
 }
 
 impl Default for AppSettings {
@@ -42,7 +49,27 @@ impl Default for AppSettings {
             show_context_chip: true,
             allow_duplicates: true,
             allow_external_paths: true,
+            commands_dir: None,
         }
+    }
+}
+
+impl AppSettings {
+    /// Return the effective commands root directory.
+    /// If `commands_dir` is set and is an absolute path, use it.
+    /// Otherwise fall back to `<config_dir>/commands/`.
+    pub fn commands_root(&self, config_dir: &Path) -> PathBuf {
+        if let Some(ref custom) = self.commands_dir {
+            let p = PathBuf::from(custom);
+            if p.is_absolute() {
+                return p;
+            }
+            eprintln!(
+                "[nimble] commands_dir {:?} is not absolute, falling back to default",
+                custom
+            );
+        }
+        config_dir.join("commands")
     }
 }
 
@@ -132,6 +159,7 @@ mod tests {
             show_context_chip: false,
             allow_duplicates: false,
             allow_external_paths: false,
+            commands_dir: None,
         };
         save(dir.path(), &original).unwrap();
         let reloaded = load(dir.path());
@@ -171,5 +199,72 @@ mod tests {
         .unwrap();
         let s = load(dir.path());
         assert!(!s.allow_external_paths);
+    }
+
+    #[test]
+    fn commands_dir_defaults_to_none() {
+        let dir = TempDir::new().unwrap();
+        let s = load(dir.path());
+        assert_eq!(s.commands_dir, None);
+    }
+
+    #[test]
+    fn commands_dir_parses_from_yaml() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join("settings.yaml"),
+            "commands_dir: /Users/me/my-commands\n",
+        )
+        .unwrap();
+        let s = load(dir.path());
+        assert_eq!(s.commands_dir, Some("/Users/me/my-commands".to_string()));
+    }
+
+    #[test]
+    fn commands_root_uses_custom_absolute_path() {
+        let s = AppSettings {
+            commands_dir: Some("/tmp/custom-commands".to_string()),
+            ..Default::default()
+        };
+        let root = s.commands_root(Path::new("/config"));
+        assert_eq!(root, PathBuf::from("/tmp/custom-commands"));
+    }
+
+    #[test]
+    fn commands_root_falls_back_when_none() {
+        let s = AppSettings::default();
+        let root = s.commands_root(Path::new("/config"));
+        assert_eq!(root, PathBuf::from("/config/commands"));
+    }
+
+    #[test]
+    fn commands_root_falls_back_on_relative_path() {
+        let s = AppSettings {
+            commands_dir: Some("relative/path".to_string()),
+            ..Default::default()
+        };
+        let root = s.commands_root(Path::new("/config"));
+        assert_eq!(root, PathBuf::from("/config/commands"));
+    }
+
+    #[test]
+    fn commands_dir_none_omitted_from_yaml() {
+        let dir = TempDir::new().unwrap();
+        let s = AppSettings::default();
+        save(dir.path(), &s).unwrap();
+        let yaml = std::fs::read_to_string(dir.path().join("settings.yaml")).unwrap();
+        assert!(!yaml.contains("commands_dir"), "None commands_dir should be omitted");
+    }
+
+    #[test]
+    fn commands_dir_round_trip() {
+        let dir = TempDir::new().unwrap();
+        let original = AppSettings {
+            commands_dir: Some("/tmp/my-commands".to_string()),
+            ..Default::default()
+        };
+        save(dir.path(), &original).unwrap();
+        let reloaded = load(dir.path());
+        assert_eq!(reloaded.commands_dir, original.commands_dir);
     }
 }

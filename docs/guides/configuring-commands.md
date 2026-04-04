@@ -14,6 +14,8 @@ For the overall config directory layout see [Config Directory Structure](../refe
 | Linux | `$XDG_CONFIG_HOME/nimble/commands/` (falls back to `~/.config/nimble/commands/`) |
 | Windows | `%APPDATA%\nimble\commands\` |
 
+> **Tip:** You can override the commands directory by setting `commands_dir` in `settings.yaml` to an absolute path. See [Config Directory — settings.yaml](../reference/config-directory.md#settingsyaml).
+
 > **Tip:** open a new command file in your editor directly from shell:  
 > `code ~/Library/Application\ Support/nimble/commands/my-command.yaml`
 

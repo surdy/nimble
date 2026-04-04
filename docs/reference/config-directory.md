@@ -47,6 +47,10 @@ allow_duplicates: true
 # When false, ${VAR}-substituted script/list paths must resolve inside
 # the command directory. Default is true (external paths allowed).
 allow_external_paths: true
+
+# Optional: load commands from a custom absolute path instead of
+# <config_root>/commands/. Must be an absolute path.
+# commands_dir: /Users/me/dotfiles/nimble-commands
 ```
 
 **`hotkey`** — The global shortcut that summons the launcher from anywhere. You normally set this via the onboarding screen; editing it here manually is possible but requires a restart. Deleting this line triggers the onboarding screen on the next launch.
@@ -56,6 +60,8 @@ allow_external_paths: true
 **`allow_duplicates`** — When `true` (default), all command files are loaded regardless of phrase conflicts. Set to `false` to enable first-file-wins deduplication and surface warnings for any conflicting phrases. Takes effect on next relaunch.
 
 **`allow_external_paths`** — When `true` (default), `script:` and `list:` fields that use `${VAR}` substitution may resolve to paths outside the command directory. Set to `false` to restrict all resolved paths to the command directory. See [Writing Scripts — External scripts and lists](../guides/writing-scripts.md#external-scripts-and-lists).
+
+**`commands_dir`** — An optional absolute path to load commands from instead of `<config_root>/commands/`. Useful for pointing Nimble at a git-managed dotfiles directory or a team-shared folder. When absent, Nimble uses the default `commands/` subdirectory. Relative paths are rejected (a warning is logged and the default is used). Takes effect on next relaunch.
 
 ---
 

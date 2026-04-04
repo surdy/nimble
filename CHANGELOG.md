@@ -5,11 +5,15 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [0.8.0] — 2026-04-04
+
+### Added
+- **Custom commands directory** — new optional `commands_dir` setting in `settings.yaml` lets you load commands from any absolute path instead of the default `commands/` subdirectory; useful for dotfiles sync and team-shared command folders
+
 ## [0.7.0] — 2026-04-03
 
 ### Changed
 - **Simplified config directory path** — changed Tauri identifier from `io.switchpanel.nimble` to `nimble`; config directory is now `~/Library/Application Support/nimble/` (macOS), `~/.config/nimble/` (Linux), `%APPDATA%\nimble\` (Windows)
-- **One-time config migration** — existing installs automatically rename the old `io.switchpanel.nimble/` directory to `nimble/` on first launch
 
 ### Added
 - **Environment variables reference** — new `docs/reference/environment-variables.md` page documenting all six built-in `NIMBLE_*` variables, `${VAR}` substitution, and user-defined env precedence

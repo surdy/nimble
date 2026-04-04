@@ -367,6 +367,9 @@ struct TrayMenuState {
 /// Persisted application settings, loaded once at startup.
 struct SettingsState(Mutex<settings::AppSettings>);
 
+/// Resolved commands root directory, computed once at startup from settings.
+struct CommandsRoot(std::path::PathBuf);
+
 /// Update the tray Show/Hide item text to reflect current window visibility.
 fn sync_tray(app: &tauri::AppHandle, visible: bool) {
     let text = if visible { "Hide" } else { "Show" };
@@ -439,12 +442,9 @@ fn load_context(app: tauri::AppHandle) -> String {
 /// along with any duplicate warnings detected during loading.
 #[tauri::command]
 fn list_commands(app: tauri::AppHandle) -> Result<commands::LoadResult, String> {
-    let config_dir = app
-        .path()
-        .app_config_dir()
-        .map_err(|e| e.to_string())?;
+    let commands_root = &app.state::<CommandsRoot>().0;
     let allow_duplicates = app.state::<SettingsState>().0.lock().unwrap().allow_duplicates;
-    commands::load_from_dir(&config_dir.join("commands"), allow_duplicates)
+    commands::load_from_dir(commands_root, allow_duplicates)
 }
 
 /// Load a named list from `<commands_dir>/<command_dir>/<list_name>.yaml`.
@@ -463,7 +463,7 @@ fn load_list(
         .path()
         .app_config_dir()
         .map_err(|e| e.to_string())?;
-    let dir = config_dir.join("commands").join(&command_dir);
+    let dir = app.state::<CommandsRoot>().0.join(&command_dir);
     let allow_external = app.state::<SettingsState>().0.lock().unwrap().allow_external_paths;
     let user_env = commands::build_user_env(&config_dir, &dir, &inline_env)?;
     let env = commands::ScriptEnv {
@@ -493,7 +493,7 @@ fn run_dynamic_list(
         .path()
         .app_config_dir()
         .map_err(|e| e.to_string())?;
-    let dir = config_dir.join("commands").join(&command_dir);
+    let dir = app.state::<CommandsRoot>().0.join(&command_dir);
     let allow_external = app.state::<SettingsState>().0.lock().unwrap().allow_external_paths;
     let user_env = commands::build_user_env(&config_dir, &dir, &inline_env)?;
     let env = commands::ScriptEnv {
@@ -524,7 +524,7 @@ fn run_script_action(
         .path()
         .app_config_dir()
         .map_err(|e| e.to_string())?;
-    let dir = config_dir.join("commands").join(&command_dir);
+    let dir = app.state::<CommandsRoot>().0.join(&command_dir);
     let allow_external = app.state::<SettingsState>().0.lock().unwrap().allow_external_paths;
     let user_env = commands::build_user_env(&config_dir, &dir, &inline_env)?;
     let env = commands::ScriptEnv {
@@ -745,13 +745,15 @@ pub fn run() {
                 }
             }
             let allow_duplicates = loaded_settings.allow_duplicates;
+            let commands_root = loaded_settings.commands_root(&config_dir);
             app.manage(SettingsState(Mutex::new(loaded_settings)));
+            app.manage(CommandsRoot(commands_root.clone()));
 
             // Manage previous-app tracking for paste_text focus restoration
             app.manage(PreviousApp(Mutex::new(None)));
 
             // Start watching the commands subdirectory for live command reloads
-            watcher::start(app.handle().clone(), config_dir.join("commands"), allow_duplicates);
+            watcher::start(app.handle().clone(), commands_root, allow_duplicates);
 
             // Listen for incoming deep-link URLs (nimble://...) and route them.
             // Currently supports: nimble://ctx/set/<value> and nimble://ctx/reset.

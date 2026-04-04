@@ -5,8 +5,8 @@
 # All Copilot skills and documentation should derive schema knowledge
 # from this file.
 #
-# Last updated: 2026-03-25
-# Spec version: 2
+# Last updated: 2026-04-04
+# Spec version: 7
 
 spec_version: 6
 
@@ -416,6 +416,14 @@ settings_schema:
       description: >
         true — ${VAR}-substituted script/list paths may resolve outside the
         command directory. false — resolved paths restricted to command dir.
+    commands_dir:
+      type: string
+      required: false
+      default: null
+      description: >
+        Optional absolute path to load commands from instead of
+        <config_root>/commands/. Relative paths are rejected. When absent,
+        Nimble uses the default commands/ subdirectory.
 
 # ── Co-location patterns ───────────────────────────────────────────────
 co_location:
@@ -479,3 +487,7 @@ changelog:
       - "Config directory identifier changed from io.switchpanel.nimble to nimble."
       - "All config_dirs paths updated to use short identifier."
       - "One-time migration added for existing installs."
+  - version: 7
+    date: "2026-04-04"
+    changes:
+      - "Added commands_dir optional setting for custom commands directory path."

@@ -20,3 +20,8 @@ allow_duplicates: true
 # outside the command directory. Set to false to restrict resolved paths to
 # the command directory only.
 allow_external_paths: true
+
+# Optional: load commands from a custom absolute path instead of the default
+# <config_root>/commands/ directory. Useful for dotfiles sync or team-shared
+# command folders. Must be an absolute path; relative paths are rejected.
+# commands_dir: /Users/me/dotfiles/nimble-commands
