@@ -5,6 +5,11 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [0.8.1] — 2026-04-04
+
+### Fixed
+- **macOS notarization resilience** — CI now retries the macOS build up to 3 times (60s between attempts) to handle transient Apple notary service network failures
+
 ## [0.8.0] — 2026-04-04
 
 ### Added
