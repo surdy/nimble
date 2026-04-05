@@ -5,6 +5,11 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [0.8.2] — 2026-04-04
+
+### Fixed
+- **macOS notarization reliability** — split build+sign from notarization into separate CI steps; only the lightweight `xcrun notarytool` call retries on failure, avoiding full rebuilds on transient network issues; increased notarization timeout from 10m to 30m to handle Apple peak-load delays
+
 ## [0.8.1] — 2026-04-04
 
 ### Fixed

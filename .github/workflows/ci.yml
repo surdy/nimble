@@ -67,18 +67,31 @@ jobs:
         run: cargo test --manifest-path src-tauri/Cargo.toml
 
       # Platform builds
-      - name: Build (macOS - dmg)
+      - name: Build and sign (macOS - dmg)
         if: runner.os == 'macOS'
-        uses: nick-fields/retry@v3
-        with:
-          timeout_minutes: 30
-          max_attempts: 3
-          retry_wait_seconds: 60
-          command: npm run tauri build -- --bundles dmg
         env:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+        run: npm run tauri build -- --bundles dmg
+
+      - name: Notarize macOS DMG
+        if: runner.os == 'macOS'
+        uses: nick-fields/retry@v3
+        with:
+          timeout_minutes: 40
+          max_attempts: 3
+          retry_wait_seconds: 120
+          command: |
+            DMG=$(ls src-tauri/target/release/bundle/dmg/*.dmg | head -1)
+            xcrun notarytool submit "$DMG" \
+              --apple-id "$APPLE_ID" \
+              --password "$APPLE_PASSWORD" \
+              --team-id "$APPLE_TEAM_ID" \
+              --wait --timeout 30m
+            # Staple is best-effort — ticket is registered with Apple regardless
+            xcrun stapler staple "$DMG" || echo "::warning::Stapling failed; users need internet on first launch"
+        env:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
