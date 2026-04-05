@@ -6,7 +6,7 @@
 # from this file.
 #
 # Last updated: 2026-04-05
-# Spec version: 8
+# Spec version: 9
 
 spec_version: 6
 
@@ -21,6 +21,7 @@ config_structure:
   env.yaml: "Global user-defined environment variables for scripts"
   state.json: "Runtime state file (active context); written automatically by Nimble"
   commands/: "Directory tree of command YAML files (any nesting depth)"
+  skills/: "Bundled Copilot skill files (nimble-authoring); written on every launch"
 
 # ── Command YAML schema ────────────────────────────────────────────────
 command_schema:
@@ -360,6 +361,8 @@ contexts:
       description: "Sets the active context."
     - command: "/ctx reset"
       description: "Clears the active context."
+    - command: "/deploy copilot skill"
+      description: "Symlinks the bundled nimble-authoring skill to ~/.copilot/skills/ for VS Code Copilot."
   persistence:
     file: state.json
     location: "Config root directory"
@@ -496,3 +499,9 @@ changelog:
     date: "2026-04-05"
     changes:
       - "env.yaml and env.yml files are now excluded from command file discovery."
+  - version: 9
+    date: "2026-04-05"
+    changes:
+      - "Added skills/ to config_structure (bundled Copilot skill files)."
+      - "Added /deploy copilot skill built-in command."
+      - "Skill files are embedded in the binary and written to config dir on every launch."

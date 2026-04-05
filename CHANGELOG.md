@@ -5,6 +5,12 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [0.9.0] — 2026-04-05
+
+### Added
+- **Bundled Copilot skill** — the nimble-authoring skill (SKILL.md + nimble-spec.yaml) is now embedded in the binary and automatically installed to `<config_dir>/skills/nimble-authoring/` on every launch, keeping the skill current with the app version
+- **`/deploy copilot skill` command** — new built-in command creates a symlink (macOS/Linux) or directory junction (Windows) to `~/.copilot/skills/nimble-authoring/`, making the skill available in VS Code Copilot Chat across all workspaces
+
 ## [0.8.3] — 2026-04-05
 
 ### Fixed

@@ -1,6 +1,6 @@
 [package]
 name = "nimble"
-version = "0.8.3"
+version = "0.9.0"
 description = "Nimble - A cross-platform command-driven desktop launcher"
 authors = ["Harpreet Singh Gulati"]
 license = "MIT"
@@ -30,6 +30,7 @@ walkdir = "2"
 enigo = "0.2"
 notify = "7"
 arboard = "3"
+dirs = "5"
 
 [dev-dependencies]
 tempfile = "3"

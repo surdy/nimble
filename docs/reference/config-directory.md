@@ -24,9 +24,13 @@ Nimble/
   commands/         ← YAML command files (watched and hot-reloaded by Nimble)
     examples/       ← seeded on first launch if commands/ is empty
     …               ← your own files and subdirectories
+  skills/           ← bundled Copilot skill files (written automatically by Nimble)
+    nimble-authoring/
+      SKILL.md
+      nimble-spec.yaml
 ```
 
-All command-related files — YAML configs, list files, and scripts — live within the `commands/` tree. New subdirectories will be introduced in future releases as new features are added; each will be documented in this file.
+All command-related files — YAML configs, list files, and scripts — live within the `commands/` tree. The `skills/` directory contains bundled Copilot skill files that are written automatically on every launch to stay current with the installed version.
 
 ---
 

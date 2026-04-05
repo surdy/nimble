@@ -316,6 +316,109 @@ fn migrate_config_dir(new_dir: &std::path::Path) {
     }
 }
 
+// ── Bundled skills ─────────────────────────────────────────────────────────────
+
+/// Content of the nimble-authoring SKILL.md, embedded at compile time.
+const SKILL_MD: &str = include_str!("../../.github/skills/nimble-authoring/SKILL.md");
+
+/// Content of the nimble-authoring nimble-spec.yaml, embedded at compile time.
+const SKILL_SPEC: &str = include_str!("../../.github/skills/nimble-authoring/nimble-spec.yaml");
+
+/// Copy the bundled nimble-authoring skill files into
+/// `<config_dir>/skills/nimble-authoring/`. Always overwrites so the skill
+/// stays current with the installed app version.
+fn install_bundled_skills(config_dir: &std::path::Path) {
+    let dest = config_dir.join("skills").join("nimble-authoring");
+    if let Err(e) = std::fs::create_dir_all(&dest) {
+        eprintln!("[nimble] could not create skills dir: {e}");
+        return;
+    }
+    for (name, content) in [("SKILL.md", SKILL_MD), ("nimble-spec.yaml", SKILL_SPEC)] {
+        if let Err(e) = std::fs::write(dest.join(name), content) {
+            eprintln!("[nimble] could not write {name}: {e}");
+        }
+    }
+}
+
+/// Deploy the nimble-authoring skill to `~/.copilot/skills/nimble-authoring/`
+/// by creating a symbolic link (macOS/Linux) or copying the files (Windows).
+/// Returns Ok with a human-readable status message, or Err on failure.
+#[tauri::command]
+fn deploy_skill(app: tauri::AppHandle) -> Result<String, String> {
+    let config_dir = app.path().app_config_dir().map_err(|e| e.to_string())?;
+    let source = config_dir.join("skills").join("nimble-authoring");
+    if !source.exists() {
+        return Err("Skill files not found in config directory. Please restart Nimble.".into());
+    }
+
+    let home = dirs::home_dir().ok_or("Could not determine home directory")?;
+    let target = home.join(".copilot").join("skills").join("nimble-authoring");
+
+    // If target already exists, check if it's a symlink pointing to our source.
+    if target.exists() || target.symlink_metadata().is_ok() {
+        if target.is_symlink() {
+            let link_dest = std::fs::read_link(&target).map_err(|e| e.to_string())?;
+            if link_dest == source {
+                return Ok("Already deployed — symlink is up to date.".into());
+            }
+        }
+        // Remove existing target (file, dir, or stale symlink) so we can recreate.
+        if target.is_dir() && !target.is_symlink() {
+            std::fs::remove_dir_all(&target).map_err(|e| format!("Could not remove existing directory: {e}"))?;
+        } else {
+            std::fs::remove_file(&target).map_err(|e| format!("Could not remove existing file: {e}"))?;
+        }
+    }
+
+    // Ensure parent directory exists
+    if let Some(parent) = target.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("Could not create .copilot/skills/: {e}"))?;
+    }
+
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(&source, &target)
+            .map_err(|e| format!("Could not create symlink: {e}"))?;
+        Ok(format!("Deployed — symlinked to {}", source.display()))
+    }
+
+    #[cfg(windows)]
+    {
+        // Windows symlinks require developer mode or admin privileges.
+        // Fall back to a directory junction which works without elevation.
+        std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J",
+                   &target.to_string_lossy(),
+                   &source.to_string_lossy()])
+            .output()
+            .map_err(|e| format!("Could not create junction: {e}"))?;
+        if target.exists() {
+            Ok(format!("Deployed — junction created at {}", target.display()))
+        } else {
+            // Junction failed; fall back to copy.
+            copy_dir_recursive(&source, &target)?;
+            Ok(format!("Deployed — copied to {}", target.display()))
+        }
+    }
+}
+
+/// Recursively copy a directory. Used as a Windows fallback when junctions fail.
+#[cfg(windows)]
+fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> Result<(), String> {
+    std::fs::create_dir_all(dst).map_err(|e| e.to_string())?;
+    for entry in std::fs::read_dir(src).map_err(|e| e.to_string())? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let ty = entry.file_type().map_err(|e| e.to_string())?;
+        let dest_path = dst.join(entry.file_name());
+        if ty.is_dir() {
+            copy_dir_recursive(&entry.path(), &dest_path)?;
+        } else {
+            std::fs::copy(entry.path(), dest_path).map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(())
+}
+
 // ── Clipboard helper ───────────────────────────────────────────────────────────
 
 /// Write `text` to the system clipboard.
@@ -738,6 +841,10 @@ pub fn run() {
             // on startup without waiting for the frontend to load.
             let config_dir = app.path().app_config_dir().map_err(|e| e.to_string())?;
             migrate_config_dir(&config_dir);
+
+            // Ship bundled skill files to <config_dir>/skills/nimble-authoring/
+            install_bundled_skills(&config_dir);
+
             let loaded_settings = settings::load(&config_dir);
             if let Some(ref hotkey) = loaded_settings.hotkey {
                 if let Err(e) = do_register_shortcut(app.handle(), hotkey) {
@@ -836,7 +943,7 @@ pub fn run() {
 
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![hide_window, show_window, dismiss_launcher, register_shortcut, get_settings, save_hotkey, save_context, load_context, list_commands, load_list, run_dynamic_list, run_script_action, open_url, paste_text, copy_text])
+        .invoke_handler(tauri::generate_handler![hide_window, show_window, dismiss_launcher, register_shortcut, get_settings, save_hotkey, save_context, load_context, list_commands, load_list, run_dynamic_list, run_script_action, open_url, paste_text, copy_text, deploy_skill])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
@@ -1045,5 +1152,56 @@ mod tests {
     #[test]
     fn percent_decode_passthrough() {
         assert_eq!(percent_decode("plain"), "plain");
+    }
+
+    // ── install_bundled_skills ──────────────────────────────────────────────
+
+    #[test]
+    fn install_bundled_skills_creates_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        install_bundled_skills(tmp.path());
+        let skill_md = tmp.path().join("skills/nimble-authoring/SKILL.md");
+        let spec = tmp.path().join("skills/nimble-authoring/nimble-spec.yaml");
+        assert!(skill_md.exists(), "SKILL.md should exist");
+        assert!(spec.exists(), "nimble-spec.yaml should exist");
+        // Content should be non-empty and match the embedded strings
+        let md_content = std::fs::read_to_string(&skill_md).unwrap();
+        assert!(md_content.contains("Nimble Authoring"), "SKILL.md should contain heading");
+        let spec_content = std::fs::read_to_string(&spec).unwrap();
+        assert!(spec_content.contains("spec_version"), "spec should contain spec_version");
+    }
+
+    #[test]
+    fn install_bundled_skills_overwrites_stale_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dest = tmp.path().join("skills/nimble-authoring");
+        std::fs::create_dir_all(&dest).unwrap();
+        std::fs::write(dest.join("SKILL.md"), "old content").unwrap();
+        install_bundled_skills(tmp.path());
+        let content = std::fs::read_to_string(dest.join("SKILL.md")).unwrap();
+        assert!(content.contains("Nimble Authoring"), "should overwrite stale file");
+    }
+
+    #[test]
+    fn install_bundled_skills_idempotent() {
+        let tmp = tempfile::tempdir().unwrap();
+        install_bundled_skills(tmp.path());
+        install_bundled_skills(tmp.path()); // second call should not fail
+        let skill_md = tmp.path().join("skills/nimble-authoring/SKILL.md");
+        assert!(skill_md.exists());
+    }
+
+    // ── SKILL_MD / SKILL_SPEC constants ────────────────────────────────────
+
+    #[test]
+    fn embedded_skill_md_is_not_empty() {
+        assert!(!SKILL_MD.is_empty());
+        assert!(SKILL_MD.contains("nimble-spec.yaml"));
+    }
+
+    #[test]
+    fn embedded_spec_is_not_empty() {
+        assert!(!SKILL_SPEC.is_empty());
+        assert!(SKILL_SPEC.contains("spec_version"));
     }
 }

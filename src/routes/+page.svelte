@@ -76,6 +76,12 @@
       env: {}, source_dir: "",
       action: { type: "builtin", config: { action: "docs_open", url: "https://github.com/surdy/nimble/blob/main/docs/guides/contexts.md" } },
     },
+    {
+      phrase: "/deploy copilot skill",
+      title: "Deploy the nimble-authoring Copilot skill to ~/.copilot/skills/",
+      env: {}, source_dir: "",
+      action: { type: "builtin", config: { action: "deploy_skill" } },
+    },
   ]);
 
   // List expansion state — populated when input exactly matches a static_list phrase
@@ -92,6 +98,7 @@
   function actionBadge(cmd: { action: Action }): string {
     const type = cmd.action.type;
     if (type === "builtin" && cmd.action.config.action === "docs_open") return "Docs";
+    if (type === "builtin" && cmd.action.config.action === "deploy_skill") return "Deploy";
     switch (type) {
       case "open_url":       return "URL";
       case "paste_text":     return "Paste";
@@ -482,6 +489,21 @@
         await invoke("open_url", { url: cmd.action.config.url, param: null });
         input = "";
         dismissWithFocusRestore();
+      } else if (builtinAction === "deploy_skill") {
+        try {
+          const msg = await invoke<string>("deploy_skill");
+          input = "";
+          // Show the result briefly as the input placeholder, then dismiss
+          if (inputEl) inputEl.placeholder = msg;
+          setTimeout(() => {
+            if (inputEl) inputEl.placeholder = "";
+            dismissWithFocusRestore();
+          }, 2000);
+        } catch (err) {
+          input = "";
+          if (inputEl) inputEl.placeholder = `Error: ${err}`;
+          setTimeout(() => { if (inputEl) inputEl.placeholder = ""; }, 3000);
+        }
       }
     }
   }
