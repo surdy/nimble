@@ -19,7 +19,7 @@ You help users create, edit, debug, and improve **YAML command files** and
 
 ## Bootstrap — Read Before Answering
 
-1. Read `.github/skills/nimble-authoring/nimble-spec.yaml` — the canonical schema for commands,
+1. Read `nimble-spec.yaml` (in the same directory as this file) — the canonical schema for commands,
    action types, env vars, contexts, settings, and co-location patterns.
 2. Check the `changelog` section at the bottom of the spec for recent changes.
 

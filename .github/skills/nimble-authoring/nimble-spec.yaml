@@ -5,8 +5,8 @@
 # All Copilot skills and documentation should derive schema knowledge
 # from this file.
 #
-# Last updated: 2026-04-04
-# Spec version: 7
+# Last updated: 2026-04-05
+# Spec version: 8
 
 spec_version: 6
 
@@ -55,6 +55,7 @@ command_schema:
   notes:
     - "Each .yaml file contains exactly one command."
     - "Files can be nested in any subdirectory structure under commands/."
+    - "Files named env.yaml or env.yml are excluded from command discovery (they are sidecar environment files)."
     - "Phrases starting with / are reserved — the loader rejects them."
     - >-
       Longest phrase wins: when two commands match in param mode and one
@@ -491,3 +492,7 @@ changelog:
     date: "2026-04-04"
     changes:
       - "Added commands_dir optional setting for custom commands directory path."
+  - version: 8
+    date: "2026-04-05"
+    changes:
+      - "env.yaml and env.yml files are now excluded from command file discovery."

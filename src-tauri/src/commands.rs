@@ -784,7 +784,9 @@ pub fn run_script_values(
 
 // ── Command loader ─────────────────────────────────────────────────────────────
 
-/// Collect all `.yaml` / `.yml` file paths under `config_dir` recursively.
+/// Collect all `.yaml` / `.yml` file paths under `config_dir` recursively,
+/// excluding `env.yaml` and `env.yml` (which are sidecar environment files,
+/// not command definitions).
 fn collect_yaml_files(config_dir: &Path) -> Vec<std::path::PathBuf> {
     WalkDir::new(config_dir)
         .follow_links(false)
@@ -795,6 +797,12 @@ fn collect_yaml_files(config_dir: &Path) -> Vec<std::path::PathBuf> {
             matches!(
                 e.path().extension().and_then(|x| x.to_str()),
                 Some("yaml") | Some("yml")
+            )
+        })
+        .filter(|e| {
+            !matches!(
+                e.path().file_name().and_then(|n| n.to_str()),
+                Some("env.yaml") | Some("env.yml")
             )
         })
         .map(|e| e.into_path())
@@ -1059,6 +1067,58 @@ mod tests {
         );
         let result = load_from_dir(dir.path(), true).unwrap();
         assert_eq!(result.commands[0].source_dir, "");
+    }
+
+    #[test]
+    fn env_yaml_is_skipped_by_collect() {
+        let dir = TempDir::new().unwrap();
+        write_yaml(
+            &dir,
+            "open.yaml",
+            "phrase: open\ntitle: Open\naction:\n  type: open_url\n  config:\n    url: https://example.com\n",
+        );
+        fs::write(dir.path().join("env.yaml"), "MY_VAR: hello\n").unwrap();
+        let result = load_from_dir(dir.path(), true).unwrap();
+        assert_eq!(result.commands.len(), 1);
+    }
+
+    #[test]
+    fn env_yml_is_skipped_by_collect() {
+        let dir = TempDir::new().unwrap();
+        write_yaml(
+            &dir,
+            "open.yaml",
+            "phrase: open\ntitle: Open\naction:\n  type: open_url\n  config:\n    url: https://example.com\n",
+        );
+        fs::write(dir.path().join("env.yml"), "MY_VAR: hello\n").unwrap();
+        let result = load_from_dir(dir.path(), true).unwrap();
+        assert_eq!(result.commands.len(), 1);
+    }
+
+    #[test]
+    fn sidecar_env_yaml_in_subdir_is_skipped() {
+        let dir = TempDir::new().unwrap();
+        write_yaml(
+            &dir,
+            "sub/cmd.yaml",
+            "phrase: test\ntitle: Test\naction:\n  type: open_url\n  config:\n    url: https://example.com\n",
+        );
+        fs::create_dir_all(dir.path().join("sub")).unwrap();
+        fs::write(dir.path().join("sub/env.yaml"), "KEY: val\n").unwrap();
+        let result = load_from_dir(dir.path(), true).unwrap();
+        assert_eq!(result.commands.len(), 1);
+    }
+
+    #[test]
+    fn non_env_yaml_with_env_in_name_is_not_skipped() {
+        let dir = TempDir::new().unwrap();
+        write_yaml(
+            &dir,
+            "my-env.yaml",
+            "phrase: my env\ntitle: My Env\naction:\n  type: open_url\n  config:\n    url: https://example.com\n",
+        );
+        let result = load_from_dir(dir.path(), true).unwrap();
+        assert_eq!(result.commands.len(), 1);
     }
 
     #[test]

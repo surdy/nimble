@@ -5,6 +5,12 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [0.8.3] — 2026-04-05
+
+### Fixed
+- **env.yaml excluded from command discovery** — `env.yaml` and `env.yml` sidecar files are no longer parsed as commands, eliminating spurious warnings on load/reload
+- **Portable Copilot skill** — SKILL.md now uses a same-directory relative path to the spec file, making the skill folder self-contained for distribution outside the repo
+
 ## [0.8.2] — 2026-04-04
 
 ### Fixed
