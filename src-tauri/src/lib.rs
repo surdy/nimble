@@ -526,6 +526,54 @@ fn save_hotkey(app: tauri::AppHandle, hotkey: String) -> Result<(), String> {
     settings::save(&config_dir, &state)
 }
 
+/// Save general settings to `settings.yaml` and update the in-memory state.
+/// Hotkey changes are handled separately via `save_hotkey` + `register_shortcut`.
+#[tauri::command]
+fn save_settings(
+    app: tauri::AppHandle,
+    show_context_chip: bool,
+    allow_duplicates: bool,
+    allow_external_paths: bool,
+    commands_dir: Option<String>,
+) -> Result<(), String> {
+    let config_dir = app.path().app_config_dir().map_err(|e| e.to_string())?;
+    let binding = app.state::<SettingsState>();
+    let mut state = binding.0.lock().unwrap();
+    state.show_context_chip = show_context_chip;
+    state.allow_duplicates = allow_duplicates;
+    state.allow_external_paths = allow_external_paths;
+    state.commands_dir = commands_dir;
+    settings::save(&config_dir, &state)
+}
+
+/// Open (or focus) the dedicated Settings window.
+/// The window loads the same SPA as the main launcher; it recognises it is
+/// the settings window via its Tauri window label ("settings") and renders
+/// the settings UI instead of the launcher bar.
+#[tauri::command]
+fn open_settings_window(app: tauri::AppHandle) -> Result<(), String> {
+    // Re-use an existing settings window if one is already open.
+    if let Some(win) = app.get_webview_window("settings") {
+        win.show().ok();
+        win.set_focus().map_err(|e| e.to_string())?;
+        return Ok(());
+    }
+    tauri::WebviewWindowBuilder::new(
+        &app,
+        "settings",
+        tauri::WebviewUrl::App(std::path::PathBuf::from("index.html")),
+    )
+    .title("Nimble Settings")
+    .inner_size(520.0, 460.0)
+    .resizable(false)
+    .always_on_top(false)
+    .decorations(true)
+    .center()
+    .build()
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 /// Save the active context to `state.json` in the config directory.
 #[tauri::command]
 fn save_context(app: tauri::AppHandle, context: String) -> Result<(), String> {
@@ -943,7 +991,7 @@ pub fn run() {
 
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![hide_window, show_window, dismiss_launcher, register_shortcut, get_settings, save_hotkey, save_context, load_context, list_commands, load_list, run_dynamic_list, run_script_action, open_url, paste_text, copy_text, deploy_skill])
+        .invoke_handler(tauri::generate_handler![hide_window, show_window, dismiss_launcher, register_shortcut, get_settings, save_hotkey, save_settings, open_settings_window, save_context, load_context, list_commands, load_list, run_dynamic_list, run_script_action, open_url, paste_text, copy_text, deploy_skill])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

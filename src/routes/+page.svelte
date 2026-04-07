@@ -2,7 +2,7 @@
   import { onMount } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
   import { getCurrentWindow, LogicalSize } from "@tauri-apps/api/window";
-  import { listen } from "@tauri-apps/api/event";
+  import { listen, emit } from "@tauri-apps/api/event";
   import type { Action, AppSettings, Command, CommandsPayload, DuplicateWarning, ListItem, ReservedPhraseWarning } from "$lib/types";
 
   // ── State ──────────────────────────────────────────────────────────────
@@ -10,6 +10,14 @@
   let inputEl: HTMLInputElement | undefined = $state();
   let onboardingEl: HTMLDivElement | undefined = $state();
   const appWindow = getCurrentWindow();
+
+  // Detect whether we are running inside the dedicated settings window
+  // (label "settings") vs the main launcher window (label "main").
+  // This is synchronous so it affects initial render without any flash.
+  const isSettingsWindow = appWindow.label === "settings";
+  if (isSettingsWindow && typeof document !== "undefined") {
+    document.documentElement.classList.add("settings-window-mode");
+  }
 
   // Onboarding: shown on first launch until a shortcut is chosen
   let onboarding = $state(false);
@@ -31,6 +39,27 @@
 
   // Whether the context chip should be rendered (from settings.yaml)
   let showContextChip = $state(true);
+
+  // Full settings object (loaded on mount, kept in sync when settings are saved)
+  let currentSettings = $state<AppSettings>({
+    show_context_chip: true,
+    allow_duplicates: true,
+    allow_external_paths: true,
+  });
+
+  // ── Settings panel state ────────────────────────────────────────────────
+  // In the settings window the panel is always visible; in the launcher it is
+  // toggled by the "settings" built-in command (which now opens a new window).
+  let showSettings = $state(isSettingsWindow);
+  let settingsShowContextChip = $state(true);
+  let settingsAllowDuplicates = $state(true);
+  let settingsAllowExternalPaths = $state(true);
+  let settingsCommandsDir = $state("");
+  let settingsChangingHotkey = $state(false);
+  let settingsCapturedShortcut = $state("");
+  let settingsHotkeyError = $state("");
+  let settingsSavedTimer: ReturnType<typeof setTimeout> | null = null;
+  let settingsSaved = $state(false);
 
   // Built-in /ctx commands — always present, titles reflect current activeContext
   const builtinCommands: Command[] = $derived([
@@ -81,6 +110,12 @@
       title: "Deploy the nimble-authoring Copilot skill to ~/.copilot/skills/",
       env: {}, source_dir: "",
       action: { type: "builtin", config: { action: "deploy_skill" } },
+    },
+    {
+      phrase: "/settings",
+      title: "Open Nimble settings",
+      env: {}, source_dir: "",
+      action: { type: "builtin", config: { action: "open_settings" } },
     },
   ]);
 
@@ -286,9 +321,9 @@
     dynamicListLoaded = false;
   });
 
-  // Resize window to fit current results (skip during onboarding)
+  // Resize window to fit current results (skip during onboarding or settings)
   $effect(() => {
-    if (onboarding) return;
+    if (onboarding || showSettings) return;
     const hasQuery = input.trim() !== "";
     const WARNING_H = 40;
     const warnExtra = warningVisible ? WARNING_H : 0;
@@ -330,6 +365,94 @@
     invoke("dismiss_launcher").catch(() => appWindow.hide());
   }
 
+  // ── Settings helpers ───────────────────────────────────────────────────
+  // Opens the dedicated settings window (creates it if not already open).
+  // The launcher window hides itself immediately so it stays out of the way.
+  function openSettings() {
+    invoke("open_settings_window").catch(() => {});
+    dismiss();
+  }
+
+  async function closeSettings() {
+    // In the settings window: save and close the whole window.
+    if (isSettingsWindow) {
+      await persistSettings();
+      appWindow.close();
+      return;
+    }
+    // Fallback (should not normally be reached after the refactor).
+    showSettings = false;
+    await appWindow.setSize(LAUNCHER_SIZE);
+    dismiss();
+  }
+
+  async function restoreDefaults() {
+    settingsShowContextChip = true;
+    settingsAllowDuplicates = true;
+    settingsAllowExternalPaths = true;
+    settingsCommandsDir = "";
+    await persistSettings();
+  }
+
+  function flashSaved() {
+    if (settingsSavedTimer !== null) clearTimeout(settingsSavedTimer);
+    settingsSaved = true;
+    settingsSavedTimer = setTimeout(() => { settingsSaved = false; }, 1500);
+  }
+
+  async function persistSettings() {
+    const dir = settingsCommandsDir.trim() || undefined;
+    try {
+      await invoke("save_settings", {
+        showContextChip: settingsShowContextChip,
+        allowDuplicates: settingsAllowDuplicates,
+        allowExternalPaths: settingsAllowExternalPaths,
+        commandsDir: dir ?? null,
+      });
+      // Keep currentSettings in sync
+      currentSettings = {
+        ...currentSettings,
+        show_context_chip: settingsShowContextChip,
+        allow_duplicates: settingsAllowDuplicates,
+        allow_external_paths: settingsAllowExternalPaths,
+        commands_dir: dir,
+      };
+      // Apply show_context_chip immediately
+      showContextChip = settingsShowContextChip;
+      // Notify the launcher window so it can reload commands / refresh state.
+      emit("settings-changed").catch(() => {});
+      flashSaved();
+    } catch {
+      // Silently ignore — settings.yaml write failures are non-critical
+    }
+  }
+
+  function handleSettingsKeydown(e: KeyboardEvent) {
+    if (settingsChangingHotkey) {
+      e.preventDefault();
+      settingsHotkeyError = "";
+      const shortcut = eventToShortcut(e);
+      if (shortcut) settingsCapturedShortcut = shortcut;
+    } else if (e.key === "Escape") {
+      e.preventDefault();
+      closeSettings();
+    }
+  }
+
+  async function confirmSettingsHotkey() {
+    if (!settingsCapturedShortcut) return;
+    try {
+      await invoke("register_shortcut", { shortcut: settingsCapturedShortcut });
+      await invoke("save_hotkey", { hotkey: settingsCapturedShortcut });
+      currentSettings = { ...currentSettings, hotkey: settingsCapturedShortcut };
+      settingsChangingHotkey = false;
+      flashSaved();
+    } catch (err) {
+      settingsHotkeyError = `Could not register shortcut: ${err}`;
+      settingsCapturedShortcut = "";
+    }
+  }
+
   // Build a Tauri-compatible accelerator string from a KeyboardEvent
   function eventToShortcut(e: KeyboardEvent): string | null {
     const mods: string[] = [];
@@ -341,7 +464,7 @@
     const ignored = new Set(["Meta", "Control", "Alt", "Shift"]);
     if (ignored.has(e.key)) return null;
     const keyMap: Record<string, string> = {
-      " ": "Space", "ArrowUp": "Up", "ArrowDown": "Down",
+      " ": "Space", "\u00a0": "Space", "ArrowUp": "Up", "ArrowDown": "Down",
       "ArrowLeft": "Left", "ArrowRight": "Right",
     };
     const key = keyMap[e.key] ?? (e.key.length === 1 ? e.key.toUpperCase() : e.key);
@@ -504,6 +627,8 @@
           if (inputEl) inputEl.placeholder = `Error: ${err}`;
           setTimeout(() => { if (inputEl) inputEl.placeholder = ""; }, 3000);
         }
+      } else if (builtinAction === "open_settings") {
+        openSettings();
       }
     }
   }
@@ -511,6 +636,7 @@
   // ── Launcher key handling ──────────────────────────────────────────────
   function handleKeydown(e: KeyboardEvent) {
     if (onboarding) return; // handled by the onboarding div
+    if (showSettings) { handleSettingsKeydown(e); return; }
     if (e.key === "Escape") {
       e.preventDefault();
       dismissWithFocusRestore();
@@ -544,13 +670,28 @@
     let unlistenFocus: (() => void) | null = null;
     let unlistenReload: (() => void) | null = null;
     let unlistenDeepLink: (() => void) | null = null;
+    let unlistenSettingsChanged: (() => void) | null = null;
 
     (async () => {
       // Load settings from the backend (settings.yaml)
       const appSettings = await invoke<AppSettings>("get_settings").catch(
-        () => ({ hotkey: undefined, show_context_chip: true, allow_duplicates: true } as AppSettings)
+        () => ({ hotkey: undefined, show_context_chip: true, allow_duplicates: true, allow_external_paths: true } as AppSettings)
       );
       showContextChip = appSettings.show_context_chip;
+      currentSettings = appSettings;
+
+      // ── Settings window path ─────────────────────────────────────────
+      // When running as the settings window we only need to populate the
+      // settings panel state and then stop — no launcher init required.
+      if (isSettingsWindow) {
+        settingsShowContextChip = appSettings.show_context_chip;
+        settingsAllowDuplicates = appSettings.allow_duplicates;
+        settingsAllowExternalPaths = appSettings.allow_external_paths;
+        settingsCommandsDir = appSettings.commands_dir ?? "";
+        return;
+      }
+
+      // ── Launcher window path ─────────────────────────────────────────
 
       // Restore active context from state.json (persisted by the backend).
       const savedContext = await invoke<string>("load_context").catch(() => "");
@@ -619,9 +760,23 @@
             .catch(() => { listItems = []; });
         }
       });
+
       // Deep-link: backend emits this event when nimble://ctx/... is opened
       unlistenDeepLink = await listen<string>("context://changed", (event) => {
         activeContext = event.payload;
+      });
+
+      // Settings-changed: emitted by the settings window after every save.
+      // Reload settings and commands so the launcher reflects the new values.
+      unlistenSettingsChanged = await listen("settings-changed", async () => {
+        const s = await invoke<AppSettings>("get_settings").catch(() => currentSettings);
+        currentSettings = s;
+        showContextChip = s.show_context_chip;
+        const result = await invoke<CommandsPayload>("list_commands").catch(() => ({ commands: [], duplicates: [], reserved: [] }));
+        commands = result.commands;
+        warnings = result.duplicates;
+        reservedWarnings = result.reserved;
+        warningsDismissed = false;
       });
     })();
 
@@ -629,6 +784,7 @@
       unlistenFocus?.();
       unlistenReload?.();
       unlistenDeepLink?.();
+      unlistenSettingsChanged?.();
     };
   });
 </script>
@@ -660,6 +816,129 @@
     <button class="ob-confirm" disabled={!capturedShortcut} onclick={confirmShortcut}>
       Confirm shortcut
     </button>
+  </div>
+{:else if showSettings}
+  <!-- ── Settings panel ────────────────────────────────────────────────── -->
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <div class="settings-panel">
+    <div class="settings-header">
+      <span class="settings-title">Settings</span>
+      <div class="settings-header-right">
+        <button class="settings-restore" onclick={restoreDefaults}>Restore Defaults</button>
+        {#if settingsSaved}
+          <span class="settings-saved-badge">Saved</span>
+        {/if}
+        <button class="settings-done" onclick={closeSettings}>Save</button>
+      </div>
+    </div>
+
+    <div class="settings-body">
+      <!-- Global shortcut -->
+      <div class="settings-row">
+        <div class="settings-row-info">
+          <span class="row-title">Global shortcut</span>
+        </div>
+        {#if settingsChangingHotkey}
+          <div class="hotkey-capture-row">
+            <!-- svelte-ignore a11y_no_static_element_interactions -->
+            <div class="shortcut-preview compact" class:active={!!settingsCapturedShortcut}>
+              {settingsCapturedShortcut || "Press a key combination…"}
+            </div>
+            <button class="action-btn cancel" onclick={() => { settingsChangingHotkey = false; settingsCapturedShortcut = ""; settingsHotkeyError = ""; }}>Cancel</button>
+            <button class="action-btn confirm" disabled={!settingsCapturedShortcut} onclick={confirmSettingsHotkey}>Confirm</button>
+          </div>
+          {#if settingsHotkeyError}
+            <p class="row-error">{settingsHotkeyError}</p>
+          {/if}
+        {:else}
+          <div class="row-right">
+            <code class="hotkey-badge">{currentSettings.hotkey ?? "Not set"}</code>
+            <button class="action-btn" onclick={() => { settingsChangingHotkey = true; settingsCapturedShortcut = ""; }}>Change</button>
+          </div>
+        {/if}
+      </div>
+
+      <!-- Show context chip -->
+      <div class="settings-row">
+        <div class="settings-row-info">
+          <span class="row-title">Show context chip</span>
+          <span class="row-desc">Display the active context label in the launcher bar</span>
+        </div>
+        <!-- svelte-ignore a11y_click_events_have_key_events -->
+        <!-- svelte-ignore a11y_no_static_element_interactions -->
+        <div
+          class="toggle"
+          class:on={settingsShowContextChip}
+          role="switch"
+          aria-checked={settingsShowContextChip}
+          tabindex="0"
+          onclick={() => { settingsShowContextChip = !settingsShowContextChip; persistSettings(); }}
+          onkeydown={(e) => { if (e.key === " " || e.key === "Enter") { settingsShowContextChip = !settingsShowContextChip; persistSettings(); } }}
+        >
+          <span class="thumb"></span>
+        </div>
+      </div>
+
+      <!-- Allow duplicates -->
+      <div class="settings-row">
+        <div class="settings-row-info">
+          <span class="row-title">Allow duplicate commands</span>
+          <span class="row-desc">Load all commands even when phrases collide</span>
+        </div>
+        <!-- svelte-ignore a11y_click_events_have_key_events -->
+        <!-- svelte-ignore a11y_no_static_element_interactions -->
+        <div
+          class="toggle"
+          class:on={settingsAllowDuplicates}
+          role="switch"
+          aria-checked={settingsAllowDuplicates}
+          tabindex="0"
+          onclick={() => { settingsAllowDuplicates = !settingsAllowDuplicates; persistSettings(); }}
+          onkeydown={(e) => { if (e.key === " " || e.key === "Enter") { settingsAllowDuplicates = !settingsAllowDuplicates; persistSettings(); } }}
+        >
+          <span class="thumb"></span>
+        </div>
+      </div>
+
+      <!-- Allow external paths -->
+      <div class="settings-row">
+        <div class="settings-row-info">
+          <span class="row-title">Allow external paths</span>
+          <span class="row-desc">Scripts can resolve to paths outside the command directory</span>
+        </div>
+        <!-- svelte-ignore a11y_click_events_have_key_events -->
+        <!-- svelte-ignore a11y_no_static_element_interactions -->
+        <div
+          class="toggle"
+          class:on={settingsAllowExternalPaths}
+          role="switch"
+          aria-checked={settingsAllowExternalPaths}
+          tabindex="0"
+          onclick={() => { settingsAllowExternalPaths = !settingsAllowExternalPaths; persistSettings(); }}
+          onkeydown={(e) => { if (e.key === " " || e.key === "Enter") { settingsAllowExternalPaths = !settingsAllowExternalPaths; persistSettings(); } }}
+        >
+          <span class="thumb"></span>
+        </div>
+      </div>
+
+      <!-- Commands directory -->
+      <div class="settings-row settings-row-stacked">
+        <div class="settings-row-info">
+          <span class="row-title">Commands directory</span>
+          <span class="row-desc">Custom absolute path (leave blank for default). Restart required.</span>
+        </div>
+        <input
+          class="settings-text-input"
+          type="text"
+          bind:value={settingsCommandsDir}
+          placeholder="Default"
+          onblur={persistSettings}
+          spellcheck="false"
+          autocomplete="off"
+          autocorrect="off"
+        />
+      </div>
+    </div>
   </div>
 {:else}
   <!-- ── Launcher bar ───────────────────────────────────────────────────── -->
@@ -775,6 +1054,22 @@
     overflow: hidden;
     user-select: none;
     -webkit-user-select: none;
+  }
+
+  /* When running as the standalone settings window, give the document a solid
+     background so the transparent webview doesn't show through decorated chrome. */
+  :global(html.settings-window-mode),
+  :global(html.settings-window-mode body) {
+    background: #1c1c1e;
+    overflow: auto;
+    height: 100%;
+  }
+
+  :global(html.settings-window-mode) .settings-panel {
+    border-radius: 0;
+    box-shadow: none;
+    height: 100vh;
+    min-height: 100vh;
   }
 
   /* ── Launcher bar ────────────────────────────────────────────────────── */
@@ -1066,6 +1361,239 @@
   .result-row.selected .action-badge {
     color: rgba(245,245,247,.5);
     background: rgba(255,255,255,.1);
+  }
+
+  /* ── Settings panel ──────────────────────────────────────────────────── */
+  .settings-panel {
+    background: rgba(28, 28, 30, 0.97);
+    border-radius: 12px;
+    box-shadow: 0 24px 64px rgba(0,0,0,.6), 0 0 0 1px rgba(255,255,255,.08);
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    overflow: hidden;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  }
+
+  .settings-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 14px 16px;
+    border-bottom: 1px solid rgba(255,255,255,.07);
+    flex-shrink: 0;
+  }
+
+  .settings-title {
+    color: #f5f5f7;
+    font-size: 15px;
+    font-weight: 600;
+  }
+
+  .settings-header-right {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+
+  .settings-saved-badge {
+    color: #30d158;
+    font-size: 12px;
+    font-weight: 500;
+  }
+
+  .settings-done {
+    background: #0a84ff;
+    border: none;
+    border-radius: 6px;
+    color: #fff;
+    font-size: 13px;
+    font-weight: 500;
+    font-family: inherit;
+    padding: 5px 14px;
+    cursor: pointer;
+    transition: opacity .15s;
+  }
+
+  .settings-done:hover { opacity: .85; }
+
+  .settings-restore {
+    background: none;
+    border: 1px solid rgba(255,255,255,.12);
+    border-radius: 6px;
+    color: rgba(245,245,247,.5);
+    font-size: 13px;
+    font-weight: 500;
+    font-family: inherit;
+    padding: 5px 14px;
+    cursor: pointer;
+    transition: color .15s, border-color .15s;
+  }
+
+  .settings-restore:hover {
+    color: #ff453a;
+    border-color: rgba(255, 69, 58, .4);
+  }
+
+  .settings-body {
+    flex: 1;
+    overflow-y: auto;
+    padding: 4px 0;
+  }
+
+  .settings-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 12px 16px;
+    border-bottom: 1px solid rgba(255,255,255,.05);
+  }
+
+  .settings-row:last-child { border-bottom: none; }
+
+  .settings-row-stacked {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 8px;
+  }
+
+  .settings-row-info {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    flex: 1;
+    min-width: 0;
+  }
+
+  .row-title {
+    color: #f5f5f7;
+    font-size: 13px;
+    font-weight: 500;
+  }
+
+  .row-desc {
+    color: rgba(245,245,247,.4);
+    font-size: 11px;
+  }
+
+  .row-error {
+    margin: 0;
+    color: #ff453a;
+    font-size: 11px;
+    padding: 0 16px 8px;
+  }
+
+  .row-right {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-shrink: 0;
+  }
+
+  .hotkey-badge {
+    background: rgba(255,255,255,.08);
+    border: 1px solid rgba(255,255,255,.12);
+    border-radius: 5px;
+    color: rgba(245,245,247,.7);
+    font-size: 12px;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    padding: 3px 8px;
+    white-space: nowrap;
+  }
+
+  .hotkey-capture-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-shrink: 0;
+  }
+
+  .shortcut-preview.compact {
+    padding: 5px 12px;
+    font-size: 12px;
+    min-width: 130px;
+  }
+
+  .action-btn {
+    background: rgba(255,255,255,.08);
+    border: 1px solid rgba(255,255,255,.12);
+    border-radius: 6px;
+    color: #f5f5f7;
+    font-size: 12px;
+    font-weight: 500;
+    font-family: inherit;
+    padding: 5px 12px;
+    cursor: pointer;
+    flex-shrink: 0;
+    transition: background .15s;
+  }
+
+  .action-btn:hover { background: rgba(255,255,255,.14); }
+  .action-btn:disabled { opacity: .35; cursor: default; }
+  .action-btn.confirm { background: rgba(10,132,255,.25); border-color: rgba(10,132,255,.4); color: #0a84ff; }
+  .action-btn.confirm:hover:not(:disabled) { background: rgba(10,132,255,.35); }
+  .action-btn.cancel { background: rgba(255,255,255,.06); }
+
+  /* Toggle switch */
+  .toggle {
+    width: 40px;
+    height: 24px;
+    border-radius: 12px;
+    background: rgba(255,255,255,.12);
+    border: 1px solid rgba(255,255,255,.1);
+    position: relative;
+    cursor: pointer;
+    flex-shrink: 0;
+    transition: background .2s, border-color .2s;
+    outline: none;
+  }
+
+  .toggle:focus-visible {
+    box-shadow: 0 0 0 2px rgba(10,132,255,.6);
+  }
+
+  .toggle.on {
+    background: #0a84ff;
+    border-color: transparent;
+  }
+
+  .toggle .thumb {
+    position: absolute;
+    top: 2px;
+    left: 2px;
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    background: rgba(245,245,247,.6);
+    transition: transform .2s, background .2s;
+  }
+
+  .toggle.on .thumb {
+    transform: translateX(16px);
+    background: #fff;
+  }
+
+  /* Commands directory text input */
+  .settings-text-input {
+    width: 100%;
+    background: rgba(255,255,255,.06);
+    border: 1px solid rgba(255,255,255,.1);
+    border-radius: 7px;
+    color: #f5f5f7;
+    font-size: 12px;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    padding: 7px 10px;
+    outline: none;
+    transition: border-color .15s;
+  }
+
+  .settings-text-input:focus {
+    border-color: rgba(10,132,255,.5);
+  }
+
+  .settings-text-input::placeholder {
+    color: rgba(245,245,247,.25);
   }
 
 </style>

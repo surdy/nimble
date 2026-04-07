@@ -1,6 +1,6 @@
 [package]
 name = "nimble"
-version = "0.9.0"
+version = "0.10.0"
 description = "Nimble - A cross-platform command-driven desktop launcher"
 authors = ["Harpreet Singh Gulati"]
 license = "MIT"

@@ -110,4 +110,5 @@ export interface AppSettings {
   show_context_chip: boolean;
   allow_duplicates: boolean;
   allow_external_paths: boolean;
+  commands_dir?: string;
 }

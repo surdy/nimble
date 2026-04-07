@@ -5,6 +5,12 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [0.10.0] — 2026-04-07
+
+### Added
+- **Settings GUI window** — added an independent settings window accessible via the `/settings` command
+- **Settings window actions** — added "Save" and "Restore Defaults" buttons to the settings panel
+
 ## [0.9.0] — 2026-04-05
 
 ### Added
