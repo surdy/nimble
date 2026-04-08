@@ -22,7 +22,7 @@ Nimble/
   env.yaml          ← global user-defined environment variables for scripts (optional)
   state.json        ← runtime state (active context); written automatically by Nimble
   commands/         ← YAML command files (watched and hot-reloaded by Nimble)
-    examples/       ← seeded on first launch if commands/ is empty
+    examples/       ← seeded on first launch when seed_examples is true
     …               ← your own files and subdirectories
   skills/           ← bundled Copilot skill files (written automatically by Nimble)
     nimble-authoring/
@@ -52,6 +52,10 @@ allow_duplicates: true
 # the command directory. Default is true (external paths allowed).
 allow_external_paths: true
 
+# When true, Nimble seeds example commands into an empty commands
+# directory on first launch. Default is false.
+# seed_examples: true
+
 # Optional: load commands from a custom absolute path instead of
 # <config_root>/commands/. Must be an absolute path.
 # commands_dir: /Users/me/dotfiles/nimble-commands
@@ -66,6 +70,8 @@ allow_external_paths: true
 **`allow_external_paths`** — When `true` (default), `script:` and `list:` fields that use `${VAR}` substitution may resolve to paths outside the command directory. Set to `false` to restrict all resolved paths to the command directory. See [Writing Scripts — External scripts and lists](../guides/writing-scripts.md#external-scripts-and-lists).
 
 **`commands_dir`** — An optional absolute path to load commands from instead of `<config_root>/commands/`. Useful for pointing Nimble at a git-managed dotfiles directory or a team-shared folder. When absent, Nimble uses the default `commands/` subdirectory. Relative paths are rejected (a warning is logged and the default is used). Takes effect on next relaunch.
+
+**`seed_examples`** — When `true`, Nimble writes a set of built-in example commands and scripts into the `commands/examples/` directory the first time the launcher loads and the commands directory is empty. Defaults to `false` — set it to `true` if you want the starter examples installed automatically.
 
 ---
 

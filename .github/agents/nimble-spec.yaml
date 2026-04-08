@@ -1,0 +1,518 @@
+# Nimble Launcher — Machine-Readable Specification
+# ═══════════════════════════════════════════════════════════════════════
+# This is the single source of truth for Nimble's command schema,
+# script interface, settings, and environment variable API.
+# All Copilot skills and documentation should derive schema knowledge
+# from this file.
+#
+# Last updated: 2026-04-08
+# Spec version: 10
+
+spec_version: 6
+
+# ── Config directory locations ──────────────────────────────────────────
+config_dirs:
+  macos: "~/Library/Application Support/nimble/"
+  linux: "$XDG_CONFIG_HOME/nimble/ (fallback: ~/.config/nimble/)"
+  windows: "%APPDATA%\\nimble\\"
+
+config_structure:
+  settings.yaml: "Application settings (hotkey, show_context_chip, etc.)"
+  env.yaml: "Global user-defined environment variables for scripts"
+  state.json: "Runtime state file (active context); written automatically by Nimble"
+  commands/: "Directory tree of command YAML files (any nesting depth)"
+  skills/: "Bundled Copilot skill files (nimble-authoring); written on every launch"
+
+# ── Command YAML schema ────────────────────────────────────────────────
+command_schema:
+  fields:
+    phrase:
+      type: string
+      required: true
+      description: >
+        Multi-word phrase the user types to trigger this command.
+        Must not start with "/" (reserved for built-in commands).
+    title:
+      type: string
+      required: true
+      description: "Human-readable label shown as the result title."
+    enabled:
+      type: boolean
+      required: false
+      default: true
+      description: "Set to false to disable the command without deleting the file."
+    env:
+      type: "map<string, string>"
+      required: false
+      default: {}
+      description: >
+        Inline user-defined env vars (highest precedence layer).
+        Keys must match [A-Za-z_][A-Za-z0-9_]* and must not start with NIMBLE_.
+    action:
+      type: Action
+      required: true
+      description: "Exactly one action block per command file."
+
+  notes:
+    - "Each .yaml file contains exactly one command."
+    - "Files can be nested in any subdirectory structure under commands/."
+    - "Files named env.yaml or env.yml are excluded from command discovery (they are sidecar environment files)."
+    - "Phrases starting with / are reserved — the loader rejects them."
+    - >-
+      Longest phrase wins: when two commands match in param mode and one
+      phrase is a prefix of the other (e.g. 'ae' vs 'ae email'), the
+      longer phrase is sorted first so it becomes the default Enter
+      target. Both commands remain visible in the results list.
+
+# ── Action types ────────────────────────────────────────────────────────
+action_types:
+  open_url:
+    description: "Open a URL in the default browser."
+    config:
+      url:
+        type: string
+        required: true
+        description: >
+          Any valid URL. Use {param} as a placeholder for user-supplied input
+          typed after the phrase.
+    example: |
+      action:
+        type: open_url
+        config:
+          url: https://www.google.com/search?q={param}
+
+  paste_text:
+    description: "Paste a predefined text string into the previously focused app."
+    config:
+      text:
+        type: string
+        required: true
+        description: "Text to paste. Use YAML | block scalar for multi-line."
+    example: |
+      action:
+        type: paste_text
+        config:
+          text: |
+            Hi,
+            Thank you for reaching out.
+
+  copy_text:
+    description: "Copy a predefined text string to the clipboard."
+    config:
+      text:
+        type: string
+        required: true
+        description: "Text to copy to the clipboard."
+    example: |
+      action:
+        type: copy_text
+        config:
+          text: hello@example.com
+
+  static_list:
+    description: "Display a named list of items inline from a TSV file."
+    config:
+      list:
+        type: string
+        required: true
+        description: >
+          List filename without .tsv extension (co-located with command YAML),
+          or a ${VAR}-substituted path to an external list file.
+      item_action:
+        type: "enum: paste_text | copy_text | open_url"
+        required: false
+        default: null
+        description: >
+          Action performed when a list item is selected. If absent, selecting
+          an item dismisses the launcher without further action.
+    list_file_format: |
+      # TSV file: one item per line, tab separates title from optional subtext.
+      # Lines starting with # are comments. Blank lines are ignored.
+      Alice Smith	alice@example.com
+      Bob Jones	bob@example.com
+      Carol White
+    list_item_value: >
+      The item's subtext (after the tab) is used as the action value.
+      Falls back to title if no tab/subtext is present.
+    co_location: "Command YAML + list TSV file in the same directory."
+    example: |
+      action:
+        type: static_list
+        config:
+          list: team-emails
+          item_action: copy_text
+
+  dynamic_list:
+    description: "Run a script and display its stdout as a pickable list."
+    config:
+      script:
+        type: string
+        required: true
+        description: >
+          Script filename (co-located with command YAML), or ${VAR}-substituted
+          path to an external script.
+      arg:
+        type: "enum: none | optional | required"
+        required: false
+        default: none
+        description: "Controls whether the script receives a user-typed suffix argument."
+      item_action:
+        type: "enum: paste_text | copy_text | open_url"
+        required: false
+        default: null
+        description: >
+          Action performed when a list item is selected. If absent, selecting
+          an item dismisses the launcher without further action.
+    co_location: "Command YAML + script in the same directory."
+    example: |
+      action:
+        type: dynamic_list
+        config:
+          script: contacts.sh
+          arg: optional
+          item_action: paste_text
+
+  script_action:
+    description: "Run a script and immediately perform a built-in action on each returned value."
+    config:
+      script:
+        type: string
+        required: true
+        description: >
+          Script filename (co-located with command YAML), or ${VAR}-substituted
+          path to an external script.
+      arg:
+        type: "enum: none | optional | required"
+        required: false
+        default: none
+        description: "Controls whether the script receives a user-typed suffix argument."
+      result_action:
+        type: "enum: open_url | paste_text | copy_text"
+        required: true
+        description: "The built-in action applied to every value the script returns."
+      prefix:
+        type: string
+        required: false
+        default: null
+        description: "Text prepended to each value (paste_text / copy_text only)."
+      suffix:
+        type: string
+        required: false
+        default: null
+        description: "Text appended to each value (paste_text / copy_text only)."
+    co_location: "Command YAML + script in the same directory."
+    example: |
+      action:
+        type: script_action
+        config:
+          script: timestamp.sh
+          arg: none
+          result_action: paste_text
+
+# ── Action selection guide ──────────────────────────────────────────────
+action_selection_guide:
+  - intent: "Open a website or app deep link"
+    action: open_url
+    key_config: "url: (use {param} for typed input)"
+  - intent: "Open a URL with a search query"
+    action: open_url
+    key_config: "url: with {param} placeholder"
+  - intent: "Paste a fixed text snippet"
+    action: paste_text
+    key_config: "text:"
+  - intent: "Copy a fixed string to clipboard"
+    action: copy_text
+    key_config: "text:"
+  - intent: "Show a pickable list of static items"
+    action: static_list
+    key_config: "list: + separate list TSV file"
+  - intent: "Run a script and show results as a list"
+    action: dynamic_list
+    key_config: "script: + arg: mode"
+  - intent: "Run a script and immediately act on the result"
+    action: script_action
+    key_config: "script: + result_action:"
+
+# ── Script interface ───────────────────────────────────────────────────
+script_interface:
+  timeout_seconds: 5
+  timeout_behaviour:
+    dynamic_list: "Empty list shown"
+    script_action: "Action cancelled"
+
+  output_formats:
+    dynamic_list:
+      json_array:
+        description: "Recommended. Array of objects with title and optional subtext."
+        example: |
+          [
+            { "title": "Alice Smith", "subtext": "alice@example.com" },
+            { "title": "Bob Jones" }
+          ]
+        notes:
+          - "Each object must have a title field."
+          - "subtext is the secondary display line and the action value (falls back to title)."
+      plain_text:
+        description: "Entire trimmed stdout becomes the title of a single item."
+      empty:
+        description: "Return nothing to show an empty list."
+
+    script_action:
+      plain_text:
+        description: "A single line becomes one value."
+      json_string_array:
+        description: "Array of strings; each is acted upon by result_action."
+        example: '["https://github.com", "https://news.ycombinator.com"]'
+
+  argument_passing:
+    modes:
+      none: "No arguments — script is called bare."
+      optional: "No arg on exact phrase match; suffix as $1 when user types more."
+      required: "Always receives the typed suffix as $1."
+    by_language:
+      shell: "$1"
+      python: "sys.argv[1] (check len(sys.argv) > 1 for optional)"
+      node: "process.argv[2]"
+      powershell: "param([string]$Query = '')"
+
+  platform_invocation:
+    macos_linux:
+      requirement: "Executable permission (+x) and shebang line"
+      invocation: "Direct execution (./script.sh)"
+    windows:
+      ps1: "powershell -ExecutionPolicy Bypass -File script.ps1"
+      other: "cmd /C script.exe"
+
+  debugging_tips:
+    - "Run scripts directly in terminal to verify output format."
+    - "Validate JSON with: ./script.sh | python3 -m json.tool"
+    - "Check stderr vs stdout — only stdout is parsed as results."
+    - "Common JSON issues: trailing commas, unescaped quotes, BOM characters."
+    - "Permission denied → chmod +x on macOS/Linux."
+
+# ── Environment variables ──────────────────────────────────────────────
+environment_variables:
+  builtin:
+    description: >
+      Injected automatically into every script subprocess. These always
+      take precedence over user-defined vars with the same name.
+    variables:
+      NIMBLE_CONTEXT:
+        description: "Active context string (empty if none set)."
+        example: "reddit"
+      NIMBLE_PHRASE:
+        description: "Command phrase that triggered this script."
+        example: "search contacts"
+      NIMBLE_CONFIG_DIR:
+        description: "Absolute path to the Nimble config root directory."
+        example: "/Users/you/Library/Application Support/nimble"
+      NIMBLE_COMMAND_DIR:
+        description: "Absolute path to the directory containing the command YAML."
+        example: "/Users/you/Library/Application Support/nimble/commands/search-contacts"
+      NIMBLE_OS:
+        description: "Operating system identifier."
+        values: ["macos", "linux", "windows"]
+      NIMBLE_VERSION:
+        description: "Nimble app version string."
+        example: "0.1.0"
+
+  user_defined:
+    description: >
+      Custom env vars defined by the user. Available as standard environment
+      variables in scripts. Three layers with increasing precedence.
+    precedence_layers:
+      - layer: 1
+        name: Global
+        location: "nimble/env.yaml (config root)"
+        scope: "All commands"
+      - layer: 2
+        name: Sidecar
+        location: "env.yaml in the command's directory"
+        scope: "Commands in that directory"
+      - layer: 3
+        name: Inline
+        location: "env: block in the command YAML"
+        scope: "That command only"
+    key_rules:
+      - "Must match [A-Za-z_][A-Za-z0-9_]*"
+      - "Must not start with NIMBLE_ (reserved namespace)"
+      - "Values are always strings (YAML auto-conversions are coerced)"
+
+  var_substitution:
+    description: >
+      script: and list: fields can use ${VAR} tokens to reference files
+      outside the command's co-located directory.
+    available_vars: "All built-in NIMBLE_* vars plus user-defined vars."
+    plain_name_rule: >
+      A plain filename (no ${…}) always resolves to the command's directory,
+      unaffected by the allow_external_paths setting.
+    external_path_setting: >
+      When allow_external_paths is false in settings.yaml, ${VAR}-resolved
+      paths must still land inside the command directory.
+
+# ── Contexts ───────────────────────────────────────────────────────────
+contexts:
+  description: >
+    A context is a word/phrase silently appended to every typed command,
+    narrowing matching to a particular topic.
+  matching_rule: "effective input = raw input + ' ' + context (unless raw input is already in param mode for a known command, in which case context is not appended)"
+  builtin_commands:
+    - command: "/ctx set <value>"
+      description: "Sets the active context."
+    - command: "/ctx reset"
+      description: "Clears the active context."
+    - command: "/deploy copilot skill"
+      description: "Symlinks the bundled nimble-authoring skill to ~/.copilot/skills/ for VS Code Copilot."
+  persistence:
+    file: state.json
+    location: "Config root directory"
+    format: '{"context": "<value>"}'
+    notes:
+      - "Written on every context change (set, reset, deep link, chip clear)."
+      - "Read on app startup to restore previous context."
+      - "External tools can read this file to query the active context."
+  deep_links:
+    scheme: nimble
+    routes:
+      - url: "nimble://ctx/set/<value>"
+        description: "Set the active context to <value>. Percent-encoded. + = space."
+      - url: "nimble://ctx/reset"
+        description: "Clear the active context."
+    notes:
+      - "Deep links are fire-and-forget — no response channel."
+      - "The app updates state.json and emits a frontend event upon receiving a link."
+  design_notes:
+    - "Phrases starting with / are reserved for built-in commands."
+    - "Context is invisible in the input bar — only matching is affected."
+    - "When no context is set, the launcher behaves as usual."
+    - "When the user types a command phrase + extra text (parameter), context is not appended to avoid polluting params. Scripts can read context via NIMBLE_CONTEXT env var."
+    - "Context persists across app restarts via state.json."
+    - "External apps can read state.json and write via nimble:// deep links."
+
+# ── Settings schema ────────────────────────────────────────────────────
+settings_schema:
+  file: settings.yaml
+  location: "Config root directory"
+  fields:
+    hotkey:
+      type: string
+      required: false
+      default: null
+      description: >
+        Global hotkey accelerator string (e.g. "Super+Space"). When absent,
+        the onboarding screen is shown at first launch.
+    show_context_chip:
+      type: boolean
+      required: false
+      default: true
+      description: "Whether to show the context chip in the launcher bar."
+    allow_duplicates:
+      type: boolean
+      required: false
+      default: true
+      description: >
+        true — all matching files loaded, no dedup. false — first-encountered
+        command wins, DuplicateWarning surfaced for collisions.
+    allow_external_paths:
+      type: boolean
+      required: false
+      default: true
+      description: >
+        true — ${VAR}-substituted script/list paths may resolve outside the
+        command directory. false — resolved paths restricted to command dir.
+    commands_dir:
+      type: string
+      required: false
+      default: null
+      description: >
+        Optional absolute path to load commands from instead of
+        <config_root>/commands/. Relative paths are rejected. When absent,
+        Nimble uses the default commands/ subdirectory.
+    seed_examples:
+      type: boolean
+      required: false
+      default: false
+      description: >
+        When true, Nimble seeds example commands into an empty commands
+        directory on first launch. Defaults to false.
+
+# ── Co-location patterns ───────────────────────────────────────────────
+co_location:
+  description: >
+    Commands that reference external files (lists, scripts) should be placed
+    in their own directory with those files alongside the command YAML.
+  patterns:
+    static_list:
+      structure: |
+        commands/show-team-emails/
+          show-team-emails.yaml   ← command YAML
+          team-emails.tsv         ← list file (TSV)
+    dynamic_list:
+      structure: |
+        commands/say-hello/
+          say-hello.yaml          ← command YAML
+          hello.sh                ← script
+    script_action:
+      structure: |
+        commands/paste-timestamp/
+          paste-timestamp.yaml    ← command YAML
+          timestamp.sh            ← script
+    with_sidecar_env:
+      structure: |
+        commands/show-user-env/
+          show-user-env.yaml      ← command YAML
+          user-env.sh             ← script
+          env.yaml                ← sidecar env vars
+
+# ── Changelog ───────────────────────────────────────────────────────────
+# Append entries here when the schema changes so agents can detect drift.
+changelog:
+  - version: 1
+    date: "2025-07-14"
+    changes:
+      - "Initial spec — all six action types, settings, env vars, contexts."
+  - version: 2
+    date: "2026-03-25"
+    changes:
+      - "Static list file format changed from YAML to TSV (.tsv extension)."
+      - "Config directory paths updated to use bundle identifier (io.switchpanel.nimble)."
+      - "Fixed action_selection_guide static_list entry to reference TSV not YAML."
+      - "NIMBLE_CONFIG_DIR and NIMBLE_COMMAND_DIR examples updated to match actual paths."
+  - version: 3
+    date: "2026-03-25"
+    changes:
+      - "Added longest-phrase-wins matching rule for param-mode conflicts."
+  - version: 4
+    date: "2026-03-25"
+    changes:
+      - "Context is no longer appended when raw input is in param mode for a known command."
+  - version: 5
+    date: "2026-04-02"
+    changes:
+      - "Added state.json to config_structure for runtime context persistence."
+      - "Added deep_links section under contexts with nimble:// URL scheme routes."
+      - "Added persistence section under contexts describing state.json format and behaviour."
+  - version: 6
+    date: "2026-04-03"
+    changes:
+      - "Config directory identifier changed from io.switchpanel.nimble to nimble."
+      - "All config_dirs paths updated to use short identifier."
+      - "One-time migration added for existing installs."
+  - version: 7
+    date: "2026-04-04"
+    changes:
+      - "Added commands_dir optional setting for custom commands directory path."
+  - version: 8
+    date: "2026-04-05"
+    changes:
+      - "env.yaml and env.yml files are now excluded from command file discovery."
+  - version: 9
+    date: "2026-04-05"
+    changes:
+      - "Added skills/ to config_structure (bundled Copilot skill files)."
+      - "Added /deploy copilot skill built-in command."
+      - "Skill files are embedded in the binary and written to config dir on every launch."
+  - version: 10
+    date: "2026-04-08"
+    changes:
+      - "Added seed_examples setting (default false); example commands no longer deployed by default."

@@ -34,6 +34,11 @@ pub struct AppSettings {
     #[serde(default = "default_true")]
     pub allow_external_paths: bool,
 
+    /// Whether to seed example commands into an empty commands directory on
+    /// first launch. Defaults to `false`.
+    #[serde(default)]
+    pub seed_examples: bool,
+
     /// Optional custom path to the commands directory.
     /// When set, Nimble loads commands from this absolute path instead of
     /// `<config_root>/commands/`. The path must be absolute.
@@ -49,6 +54,7 @@ impl Default for AppSettings {
             show_context_chip: true,
             allow_duplicates: true,
             allow_external_paths: true,
+            seed_examples: false,
             commands_dir: None,
         }
     }
@@ -159,6 +165,7 @@ mod tests {
             show_context_chip: false,
             allow_duplicates: false,
             allow_external_paths: false,
+            seed_examples: false,
             commands_dir: None,
         };
         save(dir.path(), &original).unwrap();

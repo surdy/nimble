@@ -5,6 +5,11 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [0.10.1] — 2026-04-08
+
+### Changed
+- **Example commands no longer seeded by default** — added `seed_examples` setting (defaults to `false`); built-in example commands are only deployed on first launch when explicitly opted in via `seed_examples: true` in `settings.yaml`
+
 ## [0.10.0] — 2026-04-07
 
 ### Added

@@ -5,8 +5,8 @@
 # All Copilot skills and documentation should derive schema knowledge
 # from this file.
 #
-# Last updated: 2026-04-05
-# Spec version: 9
+# Last updated: 2026-04-08
+# Spec version: 10
 
 spec_version: 6
 
@@ -428,6 +428,13 @@ settings_schema:
         Optional absolute path to load commands from instead of
         <config_root>/commands/. Relative paths are rejected. When absent,
         Nimble uses the default commands/ subdirectory.
+    seed_examples:
+      type: boolean
+      required: false
+      default: false
+      description: >
+        When true, Nimble seeds example commands into an empty commands
+        directory on first launch. Defaults to false.
 
 # ── Co-location patterns ───────────────────────────────────────────────
 co_location:
@@ -505,3 +512,7 @@ changelog:
       - "Added skills/ to config_structure (bundled Copilot skill files)."
       - "Added /deploy copilot skill built-in command."
       - "Skill files are embedded in the binary and written to config dir on every launch."
+  - version: 10
+    date: "2026-04-08"
+    changes:
+      - "Added seed_examples setting (default false); example commands no longer deployed by default."

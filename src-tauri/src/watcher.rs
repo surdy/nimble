@@ -73,7 +73,7 @@ pub fn start(app: AppHandle, commands_dir: PathBuf, allow_duplicates: bool) {
             }
 
             // Reload commands and emit to frontend
-            match commands::load_from_dir(&commands_dir, allow_duplicates) {
+            match commands::load_from_dir(&commands_dir, allow_duplicates, false) {
                 Ok(result) => {
                     if let Err(e) = app.emit(COMMANDS_RELOADED_EVENT, &result) {
                         eprintln!("[nimble] could not emit reload event: {e}");

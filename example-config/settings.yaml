@@ -21,6 +21,11 @@ allow_duplicates: true
 # the command directory only.
 allow_external_paths: true
 
+# When true, Nimble seeds example commands into an empty commands directory
+# on first launch. Defaults to false — set to true if you want the built-in
+# examples installed automatically.
+# seed_examples: true
+
 # Optional: load commands from a custom absolute path instead of the default
 # <config_root>/commands/ directory. Useful for dotfiles sync or team-shared
 # command folders. Must be an absolute path; relative paths are rejected.

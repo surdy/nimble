@@ -675,7 +675,7 @@
     (async () => {
       // Load settings from the backend (settings.yaml)
       const appSettings = await invoke<AppSettings>("get_settings").catch(
-        () => ({ hotkey: undefined, show_context_chip: true, allow_duplicates: true, allow_external_paths: true } as AppSettings)
+        () => ({ hotkey: undefined, show_context_chip: true, allow_duplicates: true, allow_external_paths: true, seed_examples: false } as AppSettings)
       );
       showContextChip = appSettings.show_context_chip;
       currentSettings = appSettings;

@@ -809,19 +809,19 @@ fn collect_yaml_files(config_dir: &Path) -> Vec<std::path::PathBuf> {
         .collect()
 }
 
-/// Ensure `config_dir` exists. If no YAML files are found, seed the example
-/// commands. Then walk the tree, parse every `.yaml`/`.yml` file as a single
-/// `Command`, and return the collected list.
+/// Ensure `config_dir` exists. If `seed_examples` is `true` and no YAML files
+/// are found, seed the example commands. Then walk the tree, parse every
+/// `.yaml`/`.yml` file as a single `Command`, and return the collected list.
 /// Files are processed oldest-first (by mtime) so that the original command
 /// always wins when duplicates are present. Files that fail to parse are
 /// skipped (with an eprintln warning) so one malformed file does not prevent
 /// others from loading.
-pub fn load_from_dir(config_dir: &Path, allow_duplicates: bool) -> Result<LoadResult, String> {
+pub fn load_from_dir(config_dir: &Path, allow_duplicates: bool, seed_examples: bool) -> Result<LoadResult, String> {
     fs::create_dir_all(config_dir)
         .map_err(|e| format!("Could not create config directory: {e}"))?;
 
-    // Seed examples if the directory contains no YAML files yet.
-    if collect_yaml_files(config_dir).is_empty() {
+    // Seed examples if enabled and the directory contains no YAML files yet.
+    if seed_examples && collect_yaml_files(config_dir).is_empty() {
         for (rel_path, content) in SEED_FILES {
             let dest = config_dir.join(rel_path);
             if let Some(parent) = dest.parent() {
@@ -950,7 +950,7 @@ mod tests {
             "open-google.yaml",
             "phrase: open google\ntitle: Open Google\naction:\n  type: open_url\n  config:\n    url: https://www.google.com\n",
         );
-        let result = load_from_dir(dir.path(), true).unwrap();
+        let result = load_from_dir(dir.path(), true, false).unwrap();
         assert_eq!(result.commands.len(), 1);
         assert_eq!(result.commands[0].phrase, "open google");
         assert!(matches!(result.commands[0].action, Action::OpenUrl(_)));
@@ -964,7 +964,7 @@ mod tests {
             "paste.yaml",
             "phrase: paste email\ntitle: Paste email\naction:\n  type: paste_text\n  config:\n    text: hello@example.com\n",
         );
-        let result = load_from_dir(dir.path(), true).unwrap();
+        let result = load_from_dir(dir.path(), true, false).unwrap();
         assert_eq!(result.commands.len(), 1);
         assert!(matches!(result.commands[0].action, Action::PasteText(_)));
     }
@@ -977,7 +977,7 @@ mod tests {
             "copy.yaml",
             "phrase: copy email\ntitle: Copy email\naction:\n  type: copy_text\n  config:\n    text: hello@example.com\n",
         );
-        let result = load_from_dir(dir.path(), true).unwrap();
+        let result = load_from_dir(dir.path(), true, false).unwrap();
         assert_eq!(result.commands.len(), 1);
         assert!(matches!(result.commands[0].action, Action::CopyText(_)));
     }
@@ -1001,7 +1001,7 @@ mod tests {
             "b.yaml",
             "phrase: open google\ntitle: Second\naction:\n  type: open_url\n  config:\n    url: https://duckduckgo.com\n",
         );
-        let result = load_from_dir(dir.path(), false).unwrap();
+        let result = load_from_dir(dir.path(), false, false).unwrap();
         assert_eq!(result.commands.len(), 1, "only one command should survive");
         assert_eq!(result.duplicates.len(), 1, "one duplicate warning expected");
         assert_eq!(result.duplicates[0].phrase, "open google");
@@ -1017,7 +1017,7 @@ mod tests {
             "disabled.yaml",
             "phrase: hidden cmd\ntitle: Hidden\nenabled: false\naction:\n  type: open_url\n  config:\n    url: https://example.com\n",
         );
-        let result = load_from_dir(dir.path(), true).unwrap();
+        let result = load_from_dir(dir.path(), true, false).unwrap();
         assert!(result.commands.is_empty(), "disabled command must be filtered out");
     }
 
@@ -1033,7 +1033,7 @@ mod tests {
             "good.yaml",
             "phrase: open google\ntitle: Open Google\naction:\n  type: open_url\n  config:\n    url: https://www.google.com\n",
         );
-        let result = load_from_dir(dir.path(), true).unwrap();
+        let result = load_from_dir(dir.path(), true, false).unwrap();
         assert_eq!(result.commands.len(), 1, "only the valid command should load");
     }
 
@@ -1045,7 +1045,7 @@ mod tests {
             "sub/show.yaml",
             "phrase: team emails\ntitle: Team emails\naction:\n  type: static_list\n  config:\n    list: team-emails\n",
         );
-        let result = load_from_dir(dir.path(), true).unwrap();
+        let result = load_from_dir(dir.path(), true, false).unwrap();
         assert_eq!(result.commands.len(), 1);
         if let Action::StaticList(cfg) = &result.commands[0].action {
             assert_eq!(cfg.list, "team-emails");
@@ -1065,7 +1065,7 @@ mod tests {
             "open.yaml",
             "phrase: open google\ntitle: Open Google\naction:\n  type: open_url\n  config:\n    url: https://www.google.com\n",
         );
-        let result = load_from_dir(dir.path(), true).unwrap();
+        let result = load_from_dir(dir.path(), true, false).unwrap();
         assert_eq!(result.commands[0].source_dir, "");
     }
 
@@ -1078,7 +1078,7 @@ mod tests {
             "phrase: open\ntitle: Open\naction:\n  type: open_url\n  config:\n    url: https://example.com\n",
         );
         fs::write(dir.path().join("env.yaml"), "MY_VAR: hello\n").unwrap();
-        let result = load_from_dir(dir.path(), true).unwrap();
+        let result = load_from_dir(dir.path(), true, false).unwrap();
         assert_eq!(result.commands.len(), 1);
     }
 
@@ -1091,7 +1091,7 @@ mod tests {
             "phrase: open\ntitle: Open\naction:\n  type: open_url\n  config:\n    url: https://example.com\n",
         );
         fs::write(dir.path().join("env.yml"), "MY_VAR: hello\n").unwrap();
-        let result = load_from_dir(dir.path(), true).unwrap();
+        let result = load_from_dir(dir.path(), true, false).unwrap();
         assert_eq!(result.commands.len(), 1);
     }
 
@@ -1105,7 +1105,7 @@ mod tests {
         );
         fs::create_dir_all(dir.path().join("sub")).unwrap();
         fs::write(dir.path().join("sub/env.yaml"), "KEY: val\n").unwrap();
-        let result = load_from_dir(dir.path(), true).unwrap();
+        let result = load_from_dir(dir.path(), true, false).unwrap();
         assert_eq!(result.commands.len(), 1);
     }
 
@@ -1117,7 +1117,7 @@ mod tests {
             "my-env.yaml",
             "phrase: my env\ntitle: My Env\naction:\n  type: open_url\n  config:\n    url: https://example.com\n",
         );
-        let result = load_from_dir(dir.path(), true).unwrap();
+        let result = load_from_dir(dir.path(), true, false).unwrap();
         assert_eq!(result.commands.len(), 1);
     }
 
@@ -1129,7 +1129,7 @@ mod tests {
             "show.yaml",
             "phrase: pick snippet\ntitle: Snippets\naction:\n  type: static_list\n  config:\n    list: snippets\n    item_action: paste_text\n",
         );
-        let result = load_from_dir(dir.path(), true).unwrap();
+        let result = load_from_dir(dir.path(), true, false).unwrap();
         if let Action::StaticList(cfg) = &result.commands[0].action {
             assert_eq!(cfg.item_action, Some(ItemAction::PasteText));
         } else {
@@ -1220,7 +1220,7 @@ mod tests {
             "dyn.yaml",
             "phrase: hello script\ntitle: Hello\naction:\n  type: dynamic_list\n  config:\n    script: hello.sh\n    arg: none\n",
         );
-        let result = load_from_dir(dir.path(), true).unwrap();
+        let result = load_from_dir(dir.path(), true, false).unwrap();
         assert_eq!(result.commands.len(), 1);
         if let Action::DynamicList(cfg) = &result.commands[0].action {
             assert_eq!(cfg.script, "hello.sh");
@@ -1239,7 +1239,7 @@ mod tests {
             "dyn.yaml",
             "phrase: hello script\ntitle: Hello\naction:\n  type: dynamic_list\n  config:\n    script: hello.sh\n",
         );
-        let result = load_from_dir(dir.path(), true).unwrap();
+        let result = load_from_dir(dir.path(), true, false).unwrap();
         if let Action::DynamicList(cfg) = &result.commands[0].action {
             assert_eq!(cfg.arg, ArgMode::None, "arg should default to none");
         } else {
@@ -1255,7 +1255,7 @@ mod tests {
             "dyn.yaml",
             "phrase: search things\ntitle: Search\naction:\n  type: dynamic_list\n  config:\n    script: search.sh\n    arg: required\n    item_action: paste_text\n",
         );
-        let result = load_from_dir(dir.path(), true).unwrap();
+        let result = load_from_dir(dir.path(), true, false).unwrap();
         if let Action::DynamicList(cfg) = &result.commands[0].action {
             assert_eq!(cfg.arg, ArgMode::Required);
             assert_eq!(cfg.item_action, Some(ItemAction::PasteText));
@@ -1420,7 +1420,7 @@ mod tests {
             "sa.yaml",
             "phrase: paste ts\ntitle: Paste timestamp\naction:\n  type: script_action\n  config:\n    script: ts.sh\n    result_action: paste_text\n",
         );
-        let result = load_from_dir(dir.path(), true).unwrap();
+        let result = load_from_dir(dir.path(), true, false).unwrap();
         assert_eq!(result.commands.len(), 1);
         if let Action::ScriptAction(cfg) = &result.commands[0].action {
             assert_eq!(cfg.script, "ts.sh");
@@ -1441,7 +1441,7 @@ mod tests {
             "sa.yaml",
             "phrase: open urls\ntitle: Open URLs\naction:\n  type: script_action\n  config:\n    script: urls.sh\n    arg: required\n    result_action: open_url\n",
         );
-        let result = load_from_dir(dir.path(), true).unwrap();
+        let result = load_from_dir(dir.path(), true, false).unwrap();
         if let Action::ScriptAction(cfg) = &result.commands[0].action {
             assert_eq!(cfg.arg, ArgMode::Required);
             assert_eq!(cfg.result_action, ResultAction::OpenUrl);
@@ -1458,7 +1458,7 @@ mod tests {
             "sa.yaml",
             "phrase: copy emails\ntitle: Copy emails\naction:\n  type: script_action\n  config:\n    script: emails.sh\n    result_action: copy_text\n    prefix: \"To: \"\n    suffix: \"\\n\"\n",
         );
-        let result = load_from_dir(dir.path(), true).unwrap();
+        let result = load_from_dir(dir.path(), true, false).unwrap();
         if let Action::ScriptAction(cfg) = &result.commands[0].action {
             assert_eq!(cfg.result_action, ResultAction::CopyText);
             assert_eq!(cfg.prefix.as_deref(), Some("To: "));
@@ -1478,7 +1478,7 @@ mod tests {
             "slash.yaml",
             "phrase: /ctx set foo\ntitle: Bad\naction:\n  type: open_url\n  config:\n    url: https://example.com\n",
         );
-        let result = load_from_dir(dir.path(), true).unwrap();
+        let result = load_from_dir(dir.path(), true, false).unwrap();
         assert!(result.commands.is_empty(), "/phrase must not load as a command");
         assert_eq!(result.reserved.len(), 1);
         assert_eq!(result.reserved[0].phrase, "/ctx set foo");
@@ -1492,7 +1492,7 @@ mod tests {
             "slash2.yaml",
             "phrase: /ctx reset\ntitle: Bad\naction:\n  type: open_url\n  config:\n    url: https://example.com\n",
         );
-        let result = load_from_dir(dir.path(), true).unwrap();
+        let result = load_from_dir(dir.path(), true, false).unwrap();
         assert!(result.commands.is_empty());
         assert_eq!(result.reserved.len(), 1);
         assert_eq!(result.reserved[0].phrase, "/ctx reset");
@@ -1506,7 +1506,7 @@ mod tests {
             "no-slash.yaml",
             "phrase: open github/issues\ntitle: Not reserved\naction:\n  type: open_url\n  config:\n    url: https://github.com\n",
         );
-        let result = load_from_dir(dir.path(), true).unwrap();
+        let result = load_from_dir(dir.path(), true, false).unwrap();
         assert_eq!(result.commands.len(), 1, "slash not at start is not reserved");
         assert!(result.reserved.is_empty());
     }
@@ -1519,7 +1519,7 @@ mod tests {
             "open-google.yaml",
             "phrase: open google\ntitle: Open Google\naction:\n  type: open_url\n  config:\n    url: https://www.google.com\n",
         );
-        let result = load_from_dir(dir.path(), true).unwrap();
+        let result = load_from_dir(dir.path(), true, false).unwrap();
         assert_eq!(result.commands.len(), 1, "normal phrase is not reserved");
         assert!(result.reserved.is_empty());
     }
@@ -1532,7 +1532,7 @@ mod tests {
             "good.yaml",
             "phrase: open google\ntitle: Open Google\naction:\n  type: open_url\n  config:\n    url: https://www.google.com\n",
         );
-        let result = load_from_dir(dir.path(), true).unwrap();
+        let result = load_from_dir(dir.path(), true, false).unwrap();
         assert!(result.reserved.is_empty());
     }
 
@@ -1551,7 +1551,7 @@ mod tests {
             "b.yaml",
             "phrase: open google\ntitle: Second\naction:\n  type: open_url\n  config:\n    url: https://duckduckgo.com\n",
         );
-        let result = load_from_dir(dir.path(), true).unwrap();
+        let result = load_from_dir(dir.path(), true, false).unwrap();
         assert_eq!(result.commands.len(), 2, "both commands should load when allow_duplicates=true");
         assert!(result.duplicates.is_empty(), "no warnings when allow_duplicates=true");
     }
@@ -1943,7 +1943,7 @@ mod tests {
             "my-cmd.yaml",
             "phrase: test cmd\ntitle: Test\nenv:\n  MY_VAR: hello\n  OTHER: world\naction:\n  type: paste_text\n  config:\n    text: hi\n",
         );
-        let result = load_from_dir(dir.path(), true).unwrap();
+        let result = load_from_dir(dir.path(), true, false).unwrap();
         assert_eq!(result.commands.len(), 1);
         assert_eq!(result.commands[0].env.get("MY_VAR").unwrap(), "hello");
         assert_eq!(result.commands[0].env.get("OTHER").unwrap(), "world");
@@ -1957,7 +1957,7 @@ mod tests {
             "my-cmd.yaml",
             "phrase: test cmd\ntitle: Test\naction:\n  type: paste_text\n  config:\n    text: hi\n",
         );
-        let result = load_from_dir(dir.path(), true).unwrap();
+        let result = load_from_dir(dir.path(), true, false).unwrap();
         assert_eq!(result.commands.len(), 1);
         assert!(result.commands[0].env.is_empty());
     }

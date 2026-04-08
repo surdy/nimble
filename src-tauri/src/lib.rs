@@ -594,8 +594,9 @@ fn load_context(app: tauri::AppHandle) -> String {
 #[tauri::command]
 fn list_commands(app: tauri::AppHandle) -> Result<commands::LoadResult, String> {
     let commands_root = &app.state::<CommandsRoot>().0;
-    let allow_duplicates = app.state::<SettingsState>().0.lock().unwrap().allow_duplicates;
-    commands::load_from_dir(commands_root, allow_duplicates)
+    let state = app.state::<SettingsState>();
+    let settings = state.0.lock().unwrap();
+    commands::load_from_dir(commands_root, settings.allow_duplicates, settings.seed_examples)
 }
 
 /// Load a named list from `<commands_dir>/<command_dir>/<list_name>.yaml`.
