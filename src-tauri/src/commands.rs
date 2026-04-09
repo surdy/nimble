@@ -349,6 +349,8 @@ pub struct ScriptEnv<'a> {
     pub phrase: &'a str,
     /// Absolute path to the Nimble config root directory.
     pub config_dir: &'a Path,
+    /// Absolute path to the commands root directory.
+    pub commands_root: &'a Path,
     /// Absolute path to the directory containing the command YAML.
     pub command_dir: &'a Path,
     /// Merged user-defined environment variables (global → sidecar → inline).
@@ -369,6 +371,7 @@ fn inject_env(cmd: &mut std::process::Command, env: &ScriptEnv<'_>) {
     cmd.env("NIMBLE_CONTEXT", env.context)
         .env("NIMBLE_PHRASE", env.phrase)
         .env("NIMBLE_CONFIG_DIR", env.config_dir.to_string_lossy().as_ref())
+        .env("NIMBLE_COMMANDS_ROOT", env.commands_root.to_string_lossy().as_ref())
         .env("NIMBLE_COMMAND_DIR", env.command_dir.to_string_lossy().as_ref())
         .env("NIMBLE_OS", if cfg!(target_os = "macos") {
             "macos"
@@ -446,15 +449,15 @@ fn load_env_yaml(path: &Path) -> Result<HashMap<String, String>, String> {
 }
 
 /// Build the merged user-defined environment by applying layers in order:
-/// global `env.yaml` → command-dir sidecar `env.yaml` → inline `env:`.
+/// global `env.yaml` (in commands root) → command-dir sidecar `env.yaml` → inline `env:`.
 /// All keys are validated; reserved `NIMBLE_*` keys are rejected.
 pub fn build_user_env(
-    config_dir: &Path,
+    commands_root: &Path,
     command_dir: &Path,
     inline_env: &HashMap<String, String>,
 ) -> Result<HashMap<String, String>, String> {
-    // Layer 1: global env.yaml at config root.
-    let mut merged = load_env_yaml(&config_dir.join("env.yaml"))?;
+    // Layer 1: global env.yaml at commands root.
+    let mut merged = load_env_yaml(&commands_root.join("env.yaml"))?;
 
     // Layer 2: sidecar env.yaml in the command directory.
     let sidecar = load_env_yaml(&command_dir.join("env.yaml"))?;
@@ -539,11 +542,13 @@ pub fn resolve_script_path(
 
     // Substitute variables — need lossy conversions for path builtins.
     let config_str = env.config_dir.to_string_lossy();
+    let cmds_root_str = env.commands_root.to_string_lossy();
     let cmd_str = env.command_dir.to_string_lossy();
     let version = env!("CARGO_PKG_VERSION");
     let mut resolved = raw.to_string();
     // Pre-substitute path-typed builtins that can't return &str easily.
     resolved = resolved.replace("${NIMBLE_CONFIG_DIR}", &config_str);
+    resolved = resolved.replace("${NIMBLE_COMMANDS_ROOT}", &cmds_root_str);
     resolved = resolved.replace("${NIMBLE_COMMAND_DIR}", &cmd_str);
     resolved = resolved.replace("${NIMBLE_VERSION}", version);
     // Now substitute remaining ${VAR} tokens.
@@ -590,10 +595,12 @@ pub fn resolve_list_path(
     }
 
     let config_str = env.config_dir.to_string_lossy();
+    let cmds_root_str = env.commands_root.to_string_lossy();
     let cmd_str = env.command_dir.to_string_lossy();
     let version = env!("CARGO_PKG_VERSION");
     let mut resolved = raw.to_string();
     resolved = resolved.replace("${NIMBLE_CONFIG_DIR}", &config_str);
+    resolved = resolved.replace("${NIMBLE_COMMANDS_ROOT}", &cmds_root_str);
     resolved = resolved.replace("${NIMBLE_COMMAND_DIR}", &cmd_str);
     resolved = resolved.replace("${NIMBLE_VERSION}", version);
     let resolved = substitute_vars(&resolved, env)?;
@@ -1276,6 +1283,7 @@ mod tests {
             context: "test-context",
             phrase: "test phrase",
             config_dir,
+            commands_root: config_dir,
             command_dir,
             user_env,
             allow_external_paths: true,
@@ -1567,6 +1575,7 @@ mod tests {
             context: "my-ctx",
             phrase: "test phrase",
             config_dir: dir.path(),
+            commands_root: dir.path(),
             command_dir: dir.path(),
             user_env: &HashMap::new(),
             allow_external_paths: true,
@@ -1584,6 +1593,7 @@ mod tests {
             context: "",
             phrase: "search contacts",
             config_dir: dir.path(),
+            commands_root: dir.path(),
             command_dir: dir.path(),
             user_env: &HashMap::new(),
             allow_external_paths: true,
@@ -1621,6 +1631,7 @@ mod tests {
             context: "",
             phrase: "test",
             config_dir: dir.path(),
+            commands_root: dir.path(),
             command_dir: dir.path(),
             user_env: &HashMap::new(),
             allow_external_paths: true,
@@ -1638,6 +1649,25 @@ mod tests {
             context: "",
             phrase: "test",
             config_dir: dir.path(),
+            commands_root: dir.path(),
+            command_dir: dir.path(),
+            user_env: &HashMap::new(),
+            allow_external_paths: true,
+        };
+        let items = run_script(dir.path(), "env.sh", None, &env).unwrap();
+        assert_eq!(items[0].title, dir.path().to_string_lossy());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_script_injects_nimble_commands_root() {
+        let dir = TempDir::new().unwrap();
+        make_script(&dir, "env.sh", "#!/bin/sh\necho \"$NIMBLE_COMMANDS_ROOT\"\n");
+        let env = ScriptEnv {
+            context: "",
+            phrase: "test",
+            config_dir: dir.path(),
+            commands_root: dir.path(),
             command_dir: dir.path(),
             user_env: &HashMap::new(),
             allow_external_paths: true,
@@ -1655,6 +1685,7 @@ mod tests {
             context: "work",
             phrase: "copy uuid",
             config_dir: dir.path(),
+            commands_root: dir.path(),
             command_dir: dir.path(),
             user_env: &HashMap::new(),
             allow_external_paths: true,
@@ -1673,6 +1704,7 @@ mod tests {
             context: "",
             phrase: "test",
             config_dir: dir.path(),
+            commands_root: dir.path(),
             command_dir: dir.path(),
             user_env: &HashMap::new(),
             allow_external_paths: true,
@@ -1794,30 +1826,33 @@ mod tests {
     #[test]
     fn build_user_env_empty_when_no_files() {
         let dir = TempDir::new().unwrap();
-        let cmd_dir = dir.path().join("commands").join("my-cmd");
+        let commands_root = dir.path().join("commands");
+        let cmd_dir = commands_root.join("my-cmd");
         fs::create_dir_all(&cmd_dir).unwrap();
-        let result = build_user_env(dir.path(), &cmd_dir, &HashMap::new()).unwrap();
+        let result = build_user_env(&commands_root, &cmd_dir, &HashMap::new()).unwrap();
         assert!(result.is_empty());
     }
 
     #[test]
     fn build_user_env_loads_global_env() {
         let dir = TempDir::new().unwrap();
-        fs::write(dir.path().join("env.yaml"), "TEAM: ops\n").unwrap();
-        let cmd_dir = dir.path().join("commands").join("my-cmd");
+        let commands_root = dir.path().join("commands");
+        let cmd_dir = commands_root.join("my-cmd");
         fs::create_dir_all(&cmd_dir).unwrap();
-        let result = build_user_env(dir.path(), &cmd_dir, &HashMap::new()).unwrap();
+        fs::write(commands_root.join("env.yaml"), "TEAM: ops\n").unwrap();
+        let result = build_user_env(&commands_root, &cmd_dir, &HashMap::new()).unwrap();
         assert_eq!(result.get("TEAM").unwrap(), "ops");
     }
 
     #[test]
     fn build_user_env_sidecar_overrides_global() {
         let dir = TempDir::new().unwrap();
-        fs::write(dir.path().join("env.yaml"), "TEAM: ops\nREGION: us\n").unwrap();
-        let cmd_dir = dir.path().join("commands").join("my-cmd");
+        let commands_root = dir.path().join("commands");
+        let cmd_dir = commands_root.join("my-cmd");
         fs::create_dir_all(&cmd_dir).unwrap();
+        fs::write(commands_root.join("env.yaml"), "TEAM: ops\nREGION: us\n").unwrap();
         fs::write(cmd_dir.join("env.yaml"), "TEAM: dev\n").unwrap();
-        let result = build_user_env(dir.path(), &cmd_dir, &HashMap::new()).unwrap();
+        let result = build_user_env(&commands_root, &cmd_dir, &HashMap::new()).unwrap();
         assert_eq!(result.get("TEAM").unwrap(), "dev");
         assert_eq!(result.get("REGION").unwrap(), "us");
     }
@@ -1825,25 +1860,27 @@ mod tests {
     #[test]
     fn build_user_env_inline_overrides_sidecar() {
         let dir = TempDir::new().unwrap();
-        let cmd_dir = dir.path().join("commands").join("my-cmd");
+        let commands_root = dir.path().join("commands");
+        let cmd_dir = commands_root.join("my-cmd");
         fs::create_dir_all(&cmd_dir).unwrap();
         fs::write(cmd_dir.join("env.yaml"), "TEAM: dev\n").unwrap();
         let mut inline = HashMap::new();
         inline.insert("TEAM".to_string(), "override".to_string());
-        let result = build_user_env(dir.path(), &cmd_dir, &inline).unwrap();
+        let result = build_user_env(&commands_root, &cmd_dir, &inline).unwrap();
         assert_eq!(result.get("TEAM").unwrap(), "override");
     }
 
     #[test]
     fn build_user_env_full_precedence_chain() {
         let dir = TempDir::new().unwrap();
-        fs::write(dir.path().join("env.yaml"), "A: global\nB: global\nC: global\n").unwrap();
-        let cmd_dir = dir.path().join("commands").join("my-cmd");
+        let commands_root = dir.path().join("commands");
+        let cmd_dir = commands_root.join("my-cmd");
         fs::create_dir_all(&cmd_dir).unwrap();
+        fs::write(commands_root.join("env.yaml"), "A: global\nB: global\nC: global\n").unwrap();
         fs::write(cmd_dir.join("env.yaml"), "B: sidecar\nC: sidecar\n").unwrap();
         let mut inline = HashMap::new();
         inline.insert("C".to_string(), "inline".to_string());
-        let result = build_user_env(dir.path(), &cmd_dir, &inline).unwrap();
+        let result = build_user_env(&commands_root, &cmd_dir, &inline).unwrap();
         assert_eq!(result.get("A").unwrap(), "global");
         assert_eq!(result.get("B").unwrap(), "sidecar");
         assert_eq!(result.get("C").unwrap(), "inline");
@@ -1852,23 +1889,29 @@ mod tests {
     #[test]
     fn build_user_env_rejects_nimble_in_inline() {
         let dir = TempDir::new().unwrap();
-        let cmd_dir = dir.path().join("commands").join("my-cmd");
+        let commands_root = dir.path().join("commands");
+        let cmd_dir = commands_root.join("my-cmd");
         fs::create_dir_all(&cmd_dir).unwrap();
         let mut inline = HashMap::new();
         inline.insert("NIMBLE_HACK".to_string(), "evil".to_string());
-        assert!(build_user_env(dir.path(), &cmd_dir, &inline).is_err());
+        assert!(build_user_env(&commands_root, &cmd_dir, &inline).is_err());
     }
 
     #[test]
     fn build_user_env_no_parent_traversal() {
         // Sidecar is only in the same directory — parent env.yaml is ignored.
         let dir = TempDir::new().unwrap();
-        let parent = dir.path().join("commands");
+        let commands_root = dir.path().join("commands");
+        fs::create_dir_all(&commands_root).unwrap();
+        fs::write(commands_root.join("env.yaml"), "GLOBAL: yes\n").unwrap();
+        let parent = commands_root.join("parent");
         fs::create_dir_all(&parent).unwrap();
         fs::write(parent.join("env.yaml"), "PARENT: yes\n").unwrap();
         let cmd_dir = parent.join("my-cmd");
         fs::create_dir_all(&cmd_dir).unwrap();
-        let result = build_user_env(dir.path(), &cmd_dir, &HashMap::new()).unwrap();
+        let result = build_user_env(&commands_root, &cmd_dir, &HashMap::new()).unwrap();
+        // Global env.yaml is loaded, but parent dir's env.yaml is NOT (no walking).
+        assert_eq!(result.get("GLOBAL").unwrap(), "yes");
         assert!(!result.contains_key("PARENT"));
     }
 
@@ -1885,6 +1928,7 @@ mod tests {
             context: "",
             phrase: "test",
             config_dir: dir.path(),
+            commands_root: dir.path(),
             command_dir: dir.path(),
             user_env: &user_env,
             allow_external_paths: true,
@@ -1904,6 +1948,7 @@ mod tests {
             context: "",
             phrase: "test",
             config_dir: dir.path(),
+            commands_root: dir.path(),
             command_dir: dir.path(),
             user_env: &user_env,
             allow_external_paths: true,
@@ -1925,6 +1970,7 @@ mod tests {
             context: "real-context",
             phrase: "test",
             config_dir: dir.path(),
+            commands_root: dir.path(),
             command_dir: dir.path(),
             user_env: &user_env,
             allow_external_paths: true,
@@ -2000,6 +2046,7 @@ mod tests {
             context: "",
             phrase: "",
             config_dir: dir.path(),
+            commands_root: dir.path(),
             command_dir: dir.path(),
             user_env: &user_env,
             allow_external_paths: true,
@@ -2046,6 +2093,7 @@ mod tests {
             context: "real",
             phrase: "",
             config_dir: dir.path(),
+            commands_root: dir.path(),
             command_dir: dir.path(),
             user_env: &user_env,
             allow_external_paths: true,
@@ -2086,6 +2134,7 @@ mod tests {
             context: "",
             phrase: "",
             config_dir: dir.path(),
+            commands_root: dir.path(),
             command_dir: dir.path(),
             user_env: &user_env,
             allow_external_paths: true,
@@ -2104,6 +2153,7 @@ mod tests {
             context: "",
             phrase: "",
             config_dir: dir.path(),
+            commands_root: dir.path(),
             command_dir: dir.path(),
             user_env: &user_env,
             allow_external_paths: false,
@@ -2122,6 +2172,7 @@ mod tests {
             context: "",
             phrase: "",
             config_dir: dir.path(),
+            commands_root: dir.path(),
             command_dir: dir.path(),
             user_env: &HashMap::new(),
             allow_external_paths: false,
@@ -2129,6 +2180,24 @@ mod tests {
         // ${NIMBLE_COMMAND_DIR}/hello.sh should still work — it resolves inside command_dir.
         let path = resolve_script_path("${NIMBLE_COMMAND_DIR}/hello.sh", dir.path(), &env).unwrap();
         assert_eq!(path, dir.path().join("hello.sh"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_script_path_commands_root_var_works_when_external_false() {
+        let dir = TempDir::new().unwrap();
+        make_script(&dir, "shared.sh", "#!/bin/sh\necho ok\n");
+        let env = ScriptEnv {
+            context: "",
+            phrase: "",
+            config_dir: dir.path(),
+            commands_root: dir.path(),
+            command_dir: dir.path(),
+            user_env: &HashMap::new(),
+            allow_external_paths: false,
+        };
+        let path = resolve_script_path("${NIMBLE_COMMANDS_ROOT}/shared.sh", dir.path(), &env).unwrap();
+        assert_eq!(path, dir.path().join("shared.sh"));
     }
 
     // ── resolve_list_path ───────────────────────────────────────────────────
@@ -2157,6 +2226,7 @@ mod tests {
             context: "",
             phrase: "",
             config_dir: dir.path(),
+            commands_root: dir.path(),
             command_dir: dir.path(),
             user_env: &user_env,
             allow_external_paths: true,
@@ -2174,6 +2244,7 @@ mod tests {
             context: "",
             phrase: "",
             config_dir: dir.path(),
+            commands_root: dir.path(),
             command_dir: dir.path(),
             user_env: &user_env,
             allow_external_paths: true,
@@ -2191,6 +2262,7 @@ mod tests {
             context: "",
             phrase: "",
             config_dir: dir.path(),
+            commands_root: dir.path(),
             command_dir: dir.path(),
             user_env: &user_env,
             allow_external_paths: false,

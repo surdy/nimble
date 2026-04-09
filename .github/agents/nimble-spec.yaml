@@ -6,9 +6,9 @@
 # from this file.
 #
 # Last updated: 2026-04-08
-# Spec version: 10
+# Spec version: 12
 
-spec_version: 6
+spec_version: 12
 
 # ── Config directory locations ──────────────────────────────────────────
 config_dirs:
@@ -18,9 +18,9 @@ config_dirs:
 
 config_structure:
   settings.yaml: "Application settings (hotkey, show_context_chip, etc.)"
-  env.yaml: "Global user-defined environment variables for scripts"
   state.json: "Runtime state file (active context); written automatically by Nimble"
   commands/: "Directory tree of command YAML files (any nesting depth)"
+  commands/env.yaml: "Global user-defined environment variables for scripts"
   skills/: "Bundled Copilot skill files (nimble-authoring); written on every launch"
 
 # ── Command YAML schema ────────────────────────────────────────────────
@@ -306,6 +306,9 @@ environment_variables:
       NIMBLE_CONFIG_DIR:
         description: "Absolute path to the Nimble config root directory."
         example: "/Users/you/Library/Application Support/nimble"
+      NIMBLE_COMMANDS_ROOT:
+        description: "Absolute path to the commands root directory."
+        example: "/Users/you/Library/Application Support/nimble/commands"
       NIMBLE_COMMAND_DIR:
         description: "Absolute path to the directory containing the command YAML."
         example: "/Users/you/Library/Application Support/nimble/commands/search-contacts"
@@ -323,7 +326,7 @@ environment_variables:
     precedence_layers:
       - layer: 1
         name: Global
-        location: "nimble/env.yaml (config root)"
+        location: "commands/env.yaml (commands root)"
         scope: "All commands"
       - layer: 2
         name: Sidecar
@@ -516,3 +519,11 @@ changelog:
     date: "2026-04-08"
     changes:
       - "Added seed_examples setting (default false); example commands no longer deployed by default."
+  - version: 11
+    date: "2026-04-08"
+    changes:
+      - "Moved global env.yaml from config root to commands root (commands/env.yaml)."
+  - version: 12
+    date: "2026-04-09"
+    changes:
+      - "Added NIMBLE_COMMANDS_ROOT built-in env var (absolute path to the commands root directory)."

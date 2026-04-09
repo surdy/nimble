@@ -13,6 +13,7 @@ These are injected into every script subprocess. They always take precedence ove
 | `NIMBLE_CONTEXT` | Active context string (empty if none set) | `reddit` |
 | `NIMBLE_PHRASE` | Command phrase that triggered this script | `search contacts` |
 | `NIMBLE_CONFIG_DIR` | Absolute path to the Nimble config root | `/Users/you/Library/Application Support/nimble` |
+| `NIMBLE_COMMANDS_ROOT` | Absolute path to the commands root directory | `/Users/you/Library/Application Support/nimble/commands` |
 | `NIMBLE_COMMAND_DIR` | Absolute path to the directory containing the command YAML | `/Users/you/Library/Application Support/nimble/commands/search-contacts` |
 | `NIMBLE_OS` | Operating system: `macos`, `linux`, or `windows` | `macos` |
 | `NIMBLE_VERSION` | Nimble app version string | `0.6.0` |
@@ -21,7 +22,7 @@ These are injected into every script subprocess. They always take precedence ove
 
 - `NIMBLE_CONTEXT` is an empty string (not unset) when no context is active.
 - `NIMBLE_PHRASE` contains the full phrase, not the user's partial input.
-- `NIMBLE_CONFIG_DIR` and `NIMBLE_COMMAND_DIR` are absolute paths and always set, even if invoked from a global `env.yaml`.
+- `NIMBLE_CONFIG_DIR`, `NIMBLE_COMMANDS_ROOT`, and `NIMBLE_COMMAND_DIR` are absolute paths and always set, even if invoked from a global `env.yaml`.
 - `NIMBLE_OS` is one of exactly three values: `macos`, `linux`, `windows`.
 
 ### `${VAR}` substitution in YAML fields
@@ -32,7 +33,7 @@ The `script:` and `list:` fields in command YAML support `${VAR}` tokens for pat
 action:
   type: dynamic_list
   config:
-    script: ${NIMBLE_CONFIG_DIR}/scripts/shared-lookup.sh
+    script: ${SHARED_SCRIPTS}/shared-lookup.sh
 ```
 
 A plain filename (no `${…}`) always resolves relative to the command's own directory.
@@ -49,7 +50,7 @@ Variables are merged in order — later layers override earlier ones:
 
 | Layer | Location | Scope |
 |-------|----------|-------|
-| 1. Global | `env.yaml` at the config root | All commands |
+| 1. Global | `env.yaml` at the commands root | All commands |
 | 2. Sidecar | `env.yaml` in the command's directory | Commands in that directory |
 | 3. Inline | `env:` block in the command YAML | That command only |
 
@@ -63,7 +64,7 @@ Built-in `NIMBLE_*` variables always win, regardless of layer.
 
 ### Examples
 
-**Global** (`~/Library/Application Support/nimble/env.yaml`):
+**Global** (`~/Library/Application Support/nimble/commands/env.yaml`):
 
 ```yaml
 WORK_EMAIL: alice@example.com

@@ -5,6 +5,15 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [0.11.0] — 2026-04-09
+
+### Changed
+- **Global `env.yaml` moved to commands root** — the global environment file is now loaded from `commands/env.yaml` instead of the config root, keeping all command-related configuration under `commands/`
+- **Removed global `scripts/` directory convention** — scripts should live co-located with their command YAML or be referenced via `${VAR}` paths
+
+### Added
+- **`NIMBLE_COMMANDS_ROOT` built-in env var** — new variable exposing the absolute path to the commands root directory, completing the path hierarchy (`NIMBLE_CONFIG_DIR` → `NIMBLE_COMMANDS_ROOT` → `NIMBLE_COMMAND_DIR`); available in both script subprocesses and `${VAR}` substitution in YAML fields
+
 ## [0.10.1] — 2026-04-08
 
 ### Changed

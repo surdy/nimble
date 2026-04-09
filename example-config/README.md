@@ -12,10 +12,8 @@ This directory mirrors the layout of the Nimble config directory on disk. Copy i
 ```
 example-config/
 ├── settings.yaml           # application settings (hotkey, chip, dedup, external paths)
-├── env.yaml                # global user-defined environment variables for scripts
-├── scripts/
-│   └── greeting.sh         # shared script referenced via ${NIMBLE_CONFIG_DIR}
 └── commands/
+    ├── env.yaml            # global user-defined environment variables for scripts
     └── examples/
         ├── open-google.yaml
         ├── open-github.yaml
@@ -26,7 +24,6 @@ example-config/
         ├── paste-email.yaml
         ├── paste-greeting.yaml
         ├── copy-email.yaml
-        ├── shared-greeting.yaml  # dynamic_list using ${NIMBLE_CONFIG_DIR} external script
         ├── show-team-emails/         # static_list — command + list co-located
         │   ├── show-team-emails.yaml
         │   └── team-emails.tsv
@@ -75,4 +72,3 @@ example-config/
 | `say hello` | `dynamic_list` | Shows a filterable list of greetings |
 | `paste timestamp` | `script_action` | Pastes the current date/time |
 | `show user env` | `dynamic_list` | Shows user-defined env vars (global + sidecar + inline demo) |
-| `shared greeting` | `dynamic_list` | Shows a greeting from a shared script via `${NIMBLE_CONFIG_DIR}` |

@@ -615,13 +615,15 @@ fn load_list(
         .path()
         .app_config_dir()
         .map_err(|e| e.to_string())?;
-    let dir = app.state::<CommandsRoot>().0.join(&command_dir);
+    let commands_root = &app.state::<CommandsRoot>().0;
+    let dir = commands_root.join(&command_dir);
     let allow_external = app.state::<SettingsState>().0.lock().unwrap().allow_external_paths;
-    let user_env = commands::build_user_env(&config_dir, &dir, &inline_env)?;
+    let user_env = commands::build_user_env(commands_root, &dir, &inline_env)?;
     let env = commands::ScriptEnv {
         context: &context,
         phrase: &phrase,
         config_dir: &config_dir,
+        commands_root,
         command_dir: &dir,
         user_env: &user_env,
         allow_external_paths: allow_external,
@@ -645,13 +647,15 @@ fn run_dynamic_list(
         .path()
         .app_config_dir()
         .map_err(|e| e.to_string())?;
-    let dir = app.state::<CommandsRoot>().0.join(&command_dir);
+    let commands_root = &app.state::<CommandsRoot>().0;
+    let dir = commands_root.join(&command_dir);
     let allow_external = app.state::<SettingsState>().0.lock().unwrap().allow_external_paths;
-    let user_env = commands::build_user_env(&config_dir, &dir, &inline_env)?;
+    let user_env = commands::build_user_env(commands_root, &dir, &inline_env)?;
     let env = commands::ScriptEnv {
         context: &context,
         phrase: &phrase,
         config_dir: &config_dir,
+        commands_root,
         command_dir: &dir,
         user_env: &user_env,
         allow_external_paths: allow_external,
@@ -676,13 +680,15 @@ fn run_script_action(
         .path()
         .app_config_dir()
         .map_err(|e| e.to_string())?;
-    let dir = app.state::<CommandsRoot>().0.join(&command_dir);
+    let commands_root = &app.state::<CommandsRoot>().0;
+    let dir = commands_root.join(&command_dir);
     let allow_external = app.state::<SettingsState>().0.lock().unwrap().allow_external_paths;
-    let user_env = commands::build_user_env(&config_dir, &dir, &inline_env)?;
+    let user_env = commands::build_user_env(commands_root, &dir, &inline_env)?;
     let env = commands::ScriptEnv {
         context: &context,
         phrase: &phrase,
         config_dir: &config_dir,
+        commands_root,
         command_dir: &dir,
         user_env: &user_env,
         allow_external_paths: allow_external,

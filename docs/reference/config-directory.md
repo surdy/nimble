@@ -19,9 +19,9 @@ Nimble stores all per-user data in a single platform-specific config directory. 
 ```
 Nimble/
   settings.yaml     ← application settings (hotkey, show_context_chip, allow_duplicates)
-  env.yaml          ← global user-defined environment variables for scripts (optional)
   state.json        ← runtime state (active context); written automatically by Nimble
   commands/         ← YAML command files (watched and hot-reloaded by Nimble)
+    env.yaml        ← global user-defined environment variables for scripts (optional)
     examples/       ← seeded on first launch when seed_examples is true
     …               ← your own files and subdirectories
   skills/           ← bundled Copilot skill files (written automatically by Nimble)
@@ -77,10 +77,10 @@ allow_external_paths: true
 
 ## `env.yaml`
 
-An optional file at the config root that defines **global user-defined environment variables** injected into every script run by `dynamic_list` or `script_action` commands.
+An optional file at the root of the **commands directory** that defines **global user-defined environment variables** injected into every script run by `dynamic_list` or `script_action` commands.
 
 ```yaml
-# ~/Library/Application Support/nimble/env.yaml
+# ~/Library/Application Support/nimble/commands/env.yaml
 WORK_EMAIL: alice@example.com
 JIRA_BASE_URL: https://mycompany.atlassian.net
 ```

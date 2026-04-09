@@ -120,7 +120,7 @@ By default, `script:` and `list:` fields must be plain filenames co-located with
 
 Any `${VAR}` token in a `script:` or `list:` field is replaced with the variable's value before the path is resolved. Variables are looked up in this order:
 
-1. Built-in `NIMBLE_*` variables (e.g. `NIMBLE_CONFIG_DIR`, `NIMBLE_COMMAND_DIR`)
+1. Built-in `NIMBLE_*` variables (e.g. `NIMBLE_CONFIG_DIR`, `NIMBLE_COMMANDS_ROOT`, `NIMBLE_COMMAND_DIR`)
 2. User-defined variables (global `env.yaml` → sidecar `env.yaml` → inline `env:`)
 
 If the resolved path is absolute, it is used directly. If relative, it is resolved against the command directory.
@@ -128,7 +128,7 @@ If the resolved path is absolute, it is used directly. If relative, it is resolv
 ### Example: shared scripts directory
 
 ```yaml
-# ~/Library/Application Support/nimble/env.yaml
+# ~/Library/Application Support/nimble/commands/env.yaml
 SHARED_SCRIPTS: /opt/team/scripts
 ```
 
@@ -143,16 +143,21 @@ action:
     arg: none
 ```
 
-### Example: using NIMBLE_CONFIG_DIR
+### Example: using an env var for shared scripts
 
 ```yaml
-# References a script in the config root's scripts/ folder
+# commands/env.yaml — define a variable pointing to your shared scripts
+SHARED_SCRIPTS: /opt/team/scripts
+```
+
+```yaml
+# commands/run-utility/run-utility.yaml
 phrase: run utility
 title: Run shared utility
 action:
   type: script_action
   config:
-    script: ${NIMBLE_CONFIG_DIR}/scripts/utility.sh
+    script: ${SHARED_SCRIPTS}/utility.sh
     result_action: paste_text
 ```
 
@@ -241,7 +246,7 @@ Variables are merged in order (later layers override earlier ones):
 
 | Layer | Location | Scope |
 |-------|----------|-------|
-| 1. Global | `Nimble/env.yaml` (config root) | All commands |
+| 1. Global | `commands/env.yaml` (commands root) | All commands |
 | 2. Sidecar | `env.yaml` in the command's directory | Commands in that directory |
 | 3. Inline | `env:` block in the command YAML | That command only |
 
@@ -249,10 +254,10 @@ Built-in `NIMBLE_*` variables always take precedence and cannot be overridden.
 
 ### Global env.yaml
 
-Create `env.yaml` at the Nimble config root (alongside `settings.yaml`):
+Create `env.yaml` at the root of the commands directory (alongside your command files and subdirectories):
 
 ```yaml
-# ~/Library/Application Support/nimble/env.yaml
+# ~/Library/Application Support/nimble/commands/env.yaml
 WORK_EMAIL: alice@example.com
 JIRA_BASE_URL: https://mycompany.atlassian.net
 TEAM_SLACK_CHANNEL: C0123456789
