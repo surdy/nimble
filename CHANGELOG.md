@@ -5,6 +5,15 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [0.12.0] — 2026-04-10
+
+### Added
+- **Inline error surfacing** — list load failures, script errors, and script-action errors now display the actual error message as ⚠️ items directly in the results list, without requiring debug mode
+- **Debug mode** — toggle with `/debug` to enable session-scoped diagnostic logging; view logs inline with `/debug log` or open the log file in your editor with `/debug log open`
+- **"No matching commands" feedback** — when no command phrase matches the typed input, the launcher now shows "No matching commands" instead of the ambiguous "No results"; "No results" is reserved for commands that run successfully but return zero items
+
+---
+
 ## [0.11.0] — 2026-04-09
 
 ### Changed
@@ -13,6 +22,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 - **`NIMBLE_COMMANDS_ROOT` built-in env var** — new variable exposing the absolute path to the commands root directory, completing the path hierarchy (`NIMBLE_CONFIG_DIR` → `NIMBLE_COMMANDS_ROOT` → `NIMBLE_COMMAND_DIR`); available in both script subprocesses and `${VAR}` substitution in YAML fields
+- **Debug mode** — toggle with `/debug` to enable session-scoped diagnostic logging; logs all actions (`open_url`, `paste_text`, `copy_text`), script invocations (path, args, env, exit code, stdout/stderr, duration), and errors to `debug.log` in the config directory
+- **`/debug log` command** — view the debug log inline as a list; first item opens the log file in the default editor
+- **`NIMBLE_DEBUG` env var** — set to `1` in script subprocesses when debug mode is active, allowing scripts to emit extra diagnostic output
+- **Inline error surfacing** — when debug mode is on, list/script errors are shown as list items instead of being silently swallowed
 
 ## [0.10.1] — 2026-04-08
 

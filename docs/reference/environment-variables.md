@@ -17,6 +17,7 @@ These are injected into every script subprocess. They always take precedence ove
 | `NIMBLE_COMMAND_DIR` | Absolute path to the directory containing the command YAML | `/Users/you/Library/Application Support/nimble/commands/search-contacts` |
 | `NIMBLE_OS` | Operating system: `macos`, `linux`, or `windows` | `macos` |
 | `NIMBLE_VERSION` | Nimble app version string | `0.6.0` |
+| `NIMBLE_DEBUG` | Set to `1` when debug mode is active (via `/debug`); absent otherwise | `1` |
 
 ### Notes
 
@@ -24,6 +25,7 @@ These are injected into every script subprocess. They always take precedence ove
 - `NIMBLE_PHRASE` contains the full phrase, not the user's partial input.
 - `NIMBLE_CONFIG_DIR`, `NIMBLE_COMMANDS_ROOT`, and `NIMBLE_COMMAND_DIR` are absolute paths and always set, even if invoked from a global `env.yaml`.
 - `NIMBLE_OS` is one of exactly three values: `macos`, `linux`, `windows`.
+- `NIMBLE_DEBUG` is only set when debug mode is on (toggled via `/debug`). Scripts can check for it to emit extra diagnostic output.
 
 ### `${VAR}` substitution in YAML fields
 

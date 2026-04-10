@@ -203,9 +203,11 @@ Nimble injects a set of `NIMBLE_*` environment variables into every script it ru
 | `NIMBLE_CONTEXT` | Active context string (empty if none) | `reddit` |
 | `NIMBLE_PHRASE` | Command phrase that triggered this script | `search contacts` |
 | `NIMBLE_CONFIG_DIR` | Absolute path to the Nimble config root | `/Users/you/Library/Application Support/nimble` |
+| `NIMBLE_COMMANDS_ROOT` | Absolute path to the commands root directory | `/Users/you/Library/Application Support/nimble/commands` |
 | `NIMBLE_COMMAND_DIR` | Absolute path to the directory containing the command YAML | `/Users/you/Library/Application Support/nimble/commands/search-contacts` |
 | `NIMBLE_OS` | Operating system: `macos`, `linux`, or `windows` | `macos` |
 | `NIMBLE_VERSION` | Nimble app version | `0.1.0` |
+| `NIMBLE_DEBUG` | `1` when debug mode is active (absent otherwise) | `1` |
 
 ### Usage examples
 

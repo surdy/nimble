@@ -8,7 +8,7 @@
 # Last updated: 2026-04-08
 # Spec version: 12
 
-spec_version: 12
+spec_version: 13
 
 # ── Config directory locations ──────────────────────────────────────────
 config_dirs:
@@ -318,6 +318,9 @@ environment_variables:
       NIMBLE_VERSION:
         description: "Nimble app version string."
         example: "0.1.0"
+      NIMBLE_DEBUG:
+        description: "Set to '1' when debug mode is active (toggled via /debug); absent otherwise."
+        example: "1"
 
   user_defined:
     description: >
@@ -527,3 +530,7 @@ changelog:
     date: "2026-04-09"
     changes:
       - "Added NIMBLE_COMMANDS_ROOT built-in env var (absolute path to the commands root directory)."
+  - version: 13
+    date: "2026-04-09"
+    changes:
+      - "Added NIMBLE_DEBUG built-in env var (set to '1' when debug mode is active)."

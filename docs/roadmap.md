@@ -57,7 +57,7 @@
 - [x] External script/list paths — `${VAR}` substitution in `script:` and `list:` fields; `allow_external_paths` setting for containment control
 - [x] Custom commands directory — optional `commands_dir` setting in `settings.yaml` to load commands from an absolute path instead of the default `commands/` subdirectory
 - [x] Bundled Copilot skill — nimble-authoring skill files embedded in the binary, auto-installed to config dir, deployable via `/deploy copilot skill` command
-- [ ] Script debugging & verbose logs — add `script_debug` setting, inject `NIMBLE_DEBUG=1` for script runs in debug mode, and improve script execution diagnostics
+- [x] Script debugging & verbose logs — `/debug` toggle enables session debug mode: logs all actions, script invocations, and errors to `debug.log`; injects `NIMBLE_DEBUG=1` into scripts; surfaces errors inline; view log via `/debug log`
 - [ ] Profiles — named configuration profiles (e.g. `work`, `home`) each with their own command set, scripts, and settings; switch profiles from the launcher or on a schedule
 
 ### Community

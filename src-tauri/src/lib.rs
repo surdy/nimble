@@ -1,4 +1,5 @@
 mod commands;
+mod debug_log;
 mod settings;
 mod watcher;
 
@@ -419,6 +420,51 @@ fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> Result<()
     Ok(())
 }
 
+// ── Debug mode commands ────────────────────────────────────────────────────────
+
+/// Toggle session-scoped debug mode. Clears the log file when turning on.
+/// Returns the new debug state.
+#[tauri::command]
+fn toggle_debug(app: tauri::AppHandle) -> Result<bool, String> {
+    let state = app.state::<DebugState>();
+    let was_on = state.0.load(std::sync::atomic::Ordering::Relaxed);
+    let now_on = !was_on;
+    state
+        .0
+        .store(now_on, std::sync::atomic::Ordering::Relaxed);
+    if now_on {
+        let config_dir = app.path().app_config_dir().map_err(|e| e.to_string())?;
+        debug_log::clear(&config_dir);
+        debug_log::log(&config_dir, "DEBUG SESSION STARTED");
+    }
+    Ok(now_on)
+}
+
+/// Query whether debug mode is currently active.
+#[tauri::command]
+fn is_debug(app: tauri::AppHandle) -> bool {
+    app.state::<DebugState>()
+        .0
+        .load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Return the contents of the debug log file.
+#[tauri::command]
+fn read_debug_log(app: tauri::AppHandle) -> Result<String, String> {
+    let config_dir = app.path().app_config_dir().map_err(|e| e.to_string())?;
+    Ok(debug_log::read(&config_dir))
+}
+
+/// Open a file in the default system editor/viewer.
+#[tauri::command]
+fn open_debug_log(app: tauri::AppHandle) -> Result<(), String> {
+    let config_dir = app.path().app_config_dir().map_err(|e| e.to_string())?;
+    let path = config_dir.join("debug.log");
+    app.opener()
+        .open_path(path.to_string_lossy(), None::<&str>)
+        .map_err(|e| e.to_string())
+}
+
 // ── Clipboard helper ───────────────────────────────────────────────────────────
 
 /// Write `text` to the system clipboard.
@@ -457,7 +503,15 @@ fn write_clipboard_text(text: &str) -> Result<(), String> {
 /// Open a URL in the default browser or the registered handler for its scheme.
 #[tauri::command]
 fn open_url(app: tauri::AppHandle, url: String, param: Option<String>) -> Result<(), String> {
-    let resolved = resolve_url(url, param)?;
+    let resolved = resolve_url(url.clone(), param.clone())?;
+    if app.state::<DebugState>().0.load(std::sync::atomic::Ordering::Relaxed) {
+        if let Ok(config_dir) = app.path().app_config_dir() {
+            debug_log::log(
+                &config_dir,
+                &format!("[ACTION] open_url url={url:?} param={param:?} resolved={resolved:?}"),
+            );
+        }
+    }
     app.opener()
         .open_url(resolved, None::<&str>)
         .map_err(|e| e.to_string())
@@ -472,6 +526,11 @@ struct SettingsState(Mutex<settings::AppSettings>);
 
 /// Resolved commands root directory, computed once at startup from settings.
 struct CommandsRoot(std::path::PathBuf);
+
+/// Session-scoped debug mode flag. When true, script invocations and actions
+/// are logged to `<config_dir>/debug.log` and `NIMBLE_DEBUG=1` is injected
+/// into script subprocesses.
+struct DebugState(std::sync::atomic::AtomicBool);
 
 /// Update the tray Show/Hide item text to reflect current window visibility.
 fn sync_tray(app: &tauri::AppHandle, visible: bool) {
@@ -618,6 +677,7 @@ fn load_list(
     let commands_root = &app.state::<CommandsRoot>().0;
     let dir = commands_root.join(&command_dir);
     let allow_external = app.state::<SettingsState>().0.lock().unwrap().allow_external_paths;
+    let debug = app.state::<DebugState>().0.load(std::sync::atomic::Ordering::Relaxed);
     let user_env = commands::build_user_env(commands_root, &dir, &inline_env)?;
     let env = commands::ScriptEnv {
         context: &context,
@@ -627,7 +687,14 @@ fn load_list(
         command_dir: &dir,
         user_env: &user_env,
         allow_external_paths: allow_external,
+        debug,
     };
+    if debug {
+        debug_log::log(
+            &config_dir,
+            &format!("[LIST] load_list name={list_name:?} dir={command_dir:?}"),
+        );
+    }
     commands::load_list(&dir, &list_name, &env)
 }
 
@@ -650,6 +717,7 @@ fn run_dynamic_list(
     let commands_root = &app.state::<CommandsRoot>().0;
     let dir = commands_root.join(&command_dir);
     let allow_external = app.state::<SettingsState>().0.lock().unwrap().allow_external_paths;
+    let debug = app.state::<DebugState>().0.load(std::sync::atomic::Ordering::Relaxed);
     let user_env = commands::build_user_env(commands_root, &dir, &inline_env)?;
     let env = commands::ScriptEnv {
         context: &context,
@@ -659,6 +727,7 @@ fn run_dynamic_list(
         command_dir: &dir,
         user_env: &user_env,
         allow_external_paths: allow_external,
+        debug,
     };
     commands::run_script(&dir, &script_name, arg.as_deref(), &env)
 }
@@ -683,6 +752,7 @@ fn run_script_action(
     let commands_root = &app.state::<CommandsRoot>().0;
     let dir = commands_root.join(&command_dir);
     let allow_external = app.state::<SettingsState>().0.lock().unwrap().allow_external_paths;
+    let debug = app.state::<DebugState>().0.load(std::sync::atomic::Ordering::Relaxed);
     let user_env = commands::build_user_env(commands_root, &dir, &inline_env)?;
     let env = commands::ScriptEnv {
         context: &context,
@@ -692,6 +762,7 @@ fn run_script_action(
         command_dir: &dir,
         user_env: &user_env,
         allow_external_paths: allow_external,
+        debug,
     };
     commands::run_script_values(&dir, &script_name, arg.as_deref(), &env)
 }
@@ -769,6 +840,15 @@ fn register_shortcut(app: tauri::AppHandle, shortcut: String) -> Result<(), Stri
 fn paste_text(app: tauri::AppHandle, window: tauri::Window, text: String) -> Result<(), String> {
     validate_text(&text)?;
 
+    if app.state::<DebugState>().0.load(std::sync::atomic::Ordering::Relaxed) {
+        if let Ok(config_dir) = app.path().app_config_dir() {
+            debug_log::log(
+                &config_dir,
+                &format!("[ACTION] paste_text text={text:?}"),
+            );
+        }
+    }
+
     // 1. Hide launcher
     window.hide().ok();
     sync_tray(&app, false);
@@ -822,8 +902,16 @@ fn paste_text(app: tauri::AppHandle, window: tauri::Window, text: String) -> Res
 /// no focus restoration or keystroke simulation is performed.
 #[tauri::command]
 fn copy_text(window: tauri::Window, app: tauri::AppHandle, text: String) -> Result<(), String> {
-    validate_text(&text)?
-;
+    validate_text(&text)?;
+
+    if app.state::<DebugState>().0.load(std::sync::atomic::Ordering::Relaxed) {
+        if let Ok(config_dir) = app.path().app_config_dir() {
+            debug_log::log(
+                &config_dir,
+                &format!("[ACTION] copy_text text={text:?}"),
+            );
+        }
+    }
 
     window.hide().ok();
     sync_tray(&app, false);
@@ -910,6 +998,8 @@ pub fn run() {
             let commands_root = loaded_settings.commands_root(&config_dir);
             app.manage(SettingsState(Mutex::new(loaded_settings)));
             app.manage(CommandsRoot(commands_root.clone()));
+
+            app.manage(DebugState(std::sync::atomic::AtomicBool::new(false)));
 
             // Manage previous-app tracking for paste_text focus restoration
             app.manage(PreviousApp(Mutex::new(None)));
@@ -998,7 +1088,7 @@ pub fn run() {
 
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![hide_window, show_window, dismiss_launcher, register_shortcut, get_settings, save_hotkey, save_settings, open_settings_window, save_context, load_context, list_commands, load_list, run_dynamic_list, run_script_action, open_url, paste_text, copy_text, deploy_skill])
+        .invoke_handler(tauri::generate_handler![hide_window, show_window, dismiss_launcher, register_shortcut, get_settings, save_hotkey, save_settings, open_settings_window, save_context, load_context, list_commands, load_list, run_dynamic_list, run_script_action, open_url, paste_text, copy_text, deploy_skill, toggle_debug, is_debug, read_debug_log, open_debug_log])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

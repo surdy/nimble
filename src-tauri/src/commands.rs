@@ -6,6 +6,8 @@ use std::sync::mpsc;
 use std::time::Duration;
 use walkdir::WalkDir;
 
+use crate::debug_log;
+
 // ── Schema ─────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -357,6 +359,9 @@ pub struct ScriptEnv<'a> {
     pub user_env: &'a HashMap<String, String>,
     /// Whether resolved script/list paths may point outside the command directory.
     pub allow_external_paths: bool,
+    /// When true, log detailed diagnostics to `<config_dir>/debug.log` and
+    /// inject `NIMBLE_DEBUG=1` into the script subprocess.
+    pub debug: bool,
 }
 
 /// Inject user-defined and `NIMBLE_*` built-in environment variables into a
@@ -381,6 +386,9 @@ fn inject_env(cmd: &mut std::process::Command, env: &ScriptEnv<'_>) {
             "linux"
         })
         .env("NIMBLE_VERSION", env!("CARGO_PKG_VERSION"));
+    if env.debug {
+        cmd.env("NIMBLE_DEBUG", "1");
+    }
 }
 
 // ── User-defined environment variables ────────────────────────────────────────
@@ -652,8 +660,27 @@ pub fn run_script(
 ) -> Result<Vec<ListItem>, String> {
     let script_path = resolve_script_path(script_ref, command_dir, env)?;
     if !script_path.exists() {
-        return Err(format!("Script not found: {}", script_path.display()));
+        let msg = format!("Script not found: {}", script_path.display());
+        if env.debug {
+            debug_log::log(env.config_dir, &format!("[SCRIPT] ERROR {msg}"));
+        }
+        return Err(msg);
     }
+
+    if env.debug {
+        debug_log::log(
+            env.config_dir,
+            &format!(
+                "[SCRIPT] run_script path={} arg={:?} phrase={:?} context={:?}",
+                script_path.display(),
+                arg,
+                env.phrase,
+                env.context,
+            ),
+        );
+    }
+
+    let start = std::time::Instant::now();
 
     #[cfg(windows)]
     let mut cmd = {
@@ -677,7 +704,13 @@ pub fn run_script(
 
     let child = cmd
         .spawn()
-        .map_err(|e| format!("Could not spawn {:?}: {e}", script_path.display()))?;
+        .map_err(|e| {
+            let msg = format!("Could not spawn {:?}: {e}", script_path.display());
+            if env.debug {
+                debug_log::log(env.config_dir, &format!("[SCRIPT] ERROR {msg}"));
+            }
+            msg
+        })?;
 
     // Enforce a 5-second timeout using a background thread + channel.
     let (tx, rx) = mpsc::channel();
@@ -687,24 +720,63 @@ pub fn run_script(
 
     let output = match rx.recv_timeout(Duration::from_secs(5)) {
         Ok(Ok(out)) => out,
-        Ok(Err(e)) => return Err(format!("Script error: {e}")),
-        Err(_) => return Err(format!("Script {script_ref:?} timed out after 5 seconds")),
+        Ok(Err(e)) => {
+            let msg = format!("Script error: {e}");
+            if env.debug {
+                debug_log::log(env.config_dir, &format!("[SCRIPT] ERROR {msg}"));
+            }
+            return Err(msg);
+        }
+        Err(_) => {
+            let msg = format!("Script {script_ref:?} timed out after 5 seconds");
+            if env.debug {
+                debug_log::log(env.config_dir, &format!("[SCRIPT] ERROR {msg}"));
+            }
+            return Err(msg);
+        }
     };
 
+    let elapsed = start.elapsed();
+
     if !output.stderr.is_empty() {
-        eprintln!(
-            "[nimble] script {script_ref:?} stderr: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
+        let stderr_text = String::from_utf8_lossy(&output.stderr);
+        eprintln!("[nimble] script {script_ref:?} stderr: {stderr_text}");
+        if env.debug {
+            let snippet: String = stderr_text.chars().take(500).collect();
+            debug_log::log(
+                env.config_dir,
+                &format!("[SCRIPT] stderr: {snippet}"),
+            );
+        }
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+
+    if env.debug {
+        let stdout_snippet: String = stdout.chars().take(500).collect();
+        debug_log::log(
+            env.config_dir,
+            &format!(
+                "[SCRIPT] exit={} duration={}ms stdout({} chars): {stdout_snippet}",
+                output.status.code().unwrap_or(-1),
+                elapsed.as_millis(),
+                stdout.len(),
+            ),
+        );
+    }
+
     if stdout.is_empty() {
         return Ok(vec![]);
     }
 
     // Try JSON array first; fall back to treating the entire output as a single item title.
     if let Ok(items) = serde_json::from_str::<Vec<ListItem>>(&stdout) {
+        if env.debug {
+            debug_log::log(
+                env.config_dir,
+                &format!("[SCRIPT] parsed {} items (JSON)", items.len()),
+            );
+        }
         return Ok(items);
     }
     Ok(vec![ListItem {
@@ -732,8 +804,27 @@ pub fn run_script_values(
 ) -> Result<Vec<String>, String> {
     let script_path = resolve_script_path(script_ref, command_dir, env)?;
     if !script_path.exists() {
-        return Err(format!("Script not found: {}", script_path.display()));
+        let msg = format!("Script not found: {}", script_path.display());
+        if env.debug {
+            debug_log::log(env.config_dir, &format!("[SCRIPT] ERROR {msg}"));
+        }
+        return Err(msg);
     }
+
+    if env.debug {
+        debug_log::log(
+            env.config_dir,
+            &format!(
+                "[SCRIPT] run_script_values path={} arg={:?} phrase={:?} context={:?}",
+                script_path.display(),
+                arg,
+                env.phrase,
+                env.context,
+            ),
+        );
+    }
+
+    let start = std::time::Instant::now();
 
     #[cfg(windows)]
     let mut cmd = {
@@ -757,7 +848,13 @@ pub fn run_script_values(
 
     let child = cmd
         .spawn()
-        .map_err(|e| format!("Could not spawn {:?}: {e}", script_path.display()))?;
+        .map_err(|e| {
+            let msg = format!("Could not spawn {:?}: {e}", script_path.display());
+            if env.debug {
+                debug_log::log(env.config_dir, &format!("[SCRIPT] ERROR {msg}"));
+            }
+            msg
+        })?;
 
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
@@ -766,24 +863,63 @@ pub fn run_script_values(
 
     let output = match rx.recv_timeout(Duration::from_secs(5)) {
         Ok(Ok(out)) => out,
-        Ok(Err(e)) => return Err(format!("Script error: {e}")),
-        Err(_) => return Err(format!("Script {script_ref:?} timed out after 5 seconds")),
+        Ok(Err(e)) => {
+            let msg = format!("Script error: {e}");
+            if env.debug {
+                debug_log::log(env.config_dir, &format!("[SCRIPT] ERROR {msg}"));
+            }
+            return Err(msg);
+        }
+        Err(_) => {
+            let msg = format!("Script {script_ref:?} timed out after 5 seconds");
+            if env.debug {
+                debug_log::log(env.config_dir, &format!("[SCRIPT] ERROR {msg}"));
+            }
+            return Err(msg);
+        }
     };
 
+    let elapsed = start.elapsed();
+
     if !output.stderr.is_empty() {
-        eprintln!(
-            "[nimble] script {script_ref:?} stderr: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
+        let stderr_text = String::from_utf8_lossy(&output.stderr);
+        eprintln!("[nimble] script {script_ref:?} stderr: {stderr_text}");
+        if env.debug {
+            let snippet: String = stderr_text.chars().take(500).collect();
+            debug_log::log(
+                env.config_dir,
+                &format!("[SCRIPT] stderr: {snippet}"),
+            );
+        }
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+
+    if env.debug {
+        let stdout_snippet: String = stdout.chars().take(500).collect();
+        debug_log::log(
+            env.config_dir,
+            &format!(
+                "[SCRIPT] exit={} duration={}ms stdout({} chars): {stdout_snippet}",
+                output.status.code().unwrap_or(-1),
+                elapsed.as_millis(),
+                stdout.len(),
+            ),
+        );
+    }
+
     if stdout.is_empty() {
         return Ok(vec![]);
     }
 
     // Try JSON array of strings first; fall back to treating the output as a single value.
     if let Ok(values) = serde_json::from_str::<Vec<String>>(&stdout) {
+        if env.debug {
+            debug_log::log(
+                env.config_dir,
+                &format!("[SCRIPT] parsed {} values (JSON)", values.len()),
+            );
+        }
         return Ok(values);
     }
     Ok(vec![stdout])
@@ -1287,6 +1423,7 @@ mod tests {
             command_dir,
             user_env,
             allow_external_paths: true,
+            debug: false,
         }
     }
 
@@ -1579,6 +1716,7 @@ mod tests {
             command_dir: dir.path(),
             user_env: &HashMap::new(),
             allow_external_paths: true,
+            debug: false,
         };
         let items = run_script(dir.path(), "env.sh", None, &env).unwrap();
         assert_eq!(items[0].title, "my-ctx");
@@ -1597,6 +1735,7 @@ mod tests {
             command_dir: dir.path(),
             user_env: &HashMap::new(),
             allow_external_paths: true,
+            debug: false,
         };
         let items = run_script(dir.path(), "env.sh", None, &env).unwrap();
         assert_eq!(items[0].title, "search contacts");
@@ -1635,6 +1774,7 @@ mod tests {
             command_dir: dir.path(),
             user_env: &HashMap::new(),
             allow_external_paths: true,
+            debug: false,
         };
         let items = run_script(dir.path(), "env.sh", None, &env).unwrap();
         assert_eq!(items[0].title, dir.path().to_string_lossy());
@@ -1653,6 +1793,7 @@ mod tests {
             command_dir: dir.path(),
             user_env: &HashMap::new(),
             allow_external_paths: true,
+            debug: false,
         };
         let items = run_script(dir.path(), "env.sh", None, &env).unwrap();
         assert_eq!(items[0].title, dir.path().to_string_lossy());
@@ -1671,9 +1812,48 @@ mod tests {
             command_dir: dir.path(),
             user_env: &HashMap::new(),
             allow_external_paths: true,
+            debug: false,
         };
         let items = run_script(dir.path(), "env.sh", None, &env).unwrap();
         assert_eq!(items[0].title, dir.path().to_string_lossy());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_script_injects_nimble_debug_when_debug_on() {
+        let dir = TempDir::new().unwrap();
+        make_script(&dir, "env.sh", "#!/bin/sh\necho \"$NIMBLE_DEBUG\"\n");
+        let env = ScriptEnv {
+            context: "",
+            phrase: "test",
+            config_dir: dir.path(),
+            commands_root: dir.path(),
+            command_dir: dir.path(),
+            user_env: &HashMap::new(),
+            allow_external_paths: true,
+            debug: true,
+        };
+        let items = run_script(dir.path(), "env.sh", None, &env).unwrap();
+        assert_eq!(items[0].title, "1");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_script_does_not_inject_nimble_debug_when_debug_off() {
+        let dir = TempDir::new().unwrap();
+        make_script(&dir, "env.sh", "#!/bin/sh\necho \"debug=${NIMBLE_DEBUG:-unset}\"\n");
+        let env = ScriptEnv {
+            context: "",
+            phrase: "test",
+            config_dir: dir.path(),
+            commands_root: dir.path(),
+            command_dir: dir.path(),
+            user_env: &HashMap::new(),
+            allow_external_paths: true,
+            debug: false,
+        };
+        let items = run_script(dir.path(), "env.sh", None, &env).unwrap();
+        assert_eq!(items[0].title, "debug=unset");
     }
 
     #[cfg(unix)]
@@ -1689,6 +1869,7 @@ mod tests {
             command_dir: dir.path(),
             user_env: &HashMap::new(),
             allow_external_paths: true,
+            debug: false,
         };
         let values = run_script_values(dir.path(), "env.sh", None, &env).unwrap();
         assert_eq!(values[0], "work");
@@ -1708,6 +1889,7 @@ mod tests {
             command_dir: dir.path(),
             user_env: &HashMap::new(),
             allow_external_paths: true,
+            debug: false,
         };
         let items = run_script(dir.path(), "env.sh", None, &env).unwrap();
         assert_eq!(items[0].title, "ctx=|");
@@ -1932,6 +2114,7 @@ mod tests {
             command_dir: dir.path(),
             user_env: &user_env,
             allow_external_paths: true,
+            debug: false,
         };
         let items = run_script(dir.path(), "env.sh", None, &env).unwrap();
         assert_eq!(items[0].title, "hello-from-env");
@@ -1952,6 +2135,7 @@ mod tests {
             command_dir: dir.path(),
             user_env: &user_env,
             allow_external_paths: true,
+            debug: false,
         };
         let values = run_script_values(dir.path(), "env.sh", None, &env).unwrap();
         assert_eq!(values[0], "T12345");
@@ -1974,6 +2158,7 @@ mod tests {
             command_dir: dir.path(),
             user_env: &user_env,
             allow_external_paths: true,
+            debug: false,
         };
         let items = run_script(dir.path(), "env.sh", None, &env).unwrap();
         assert_eq!(items[0].title, "real-context");
@@ -2050,6 +2235,7 @@ mod tests {
             command_dir: dir.path(),
             user_env: &user_env,
             allow_external_paths: true,
+            debug: false,
         };
         assert_eq!(
             substitute_vars("${MY_DIR}/script.sh", &env).unwrap(),
@@ -2097,6 +2283,7 @@ mod tests {
             command_dir: dir.path(),
             user_env: &user_env,
             allow_external_paths: true,
+            debug: false,
         };
         assert_eq!(substitute_vars("${NIMBLE_CONTEXT}", &env).unwrap(), "real");
     }
@@ -2138,6 +2325,7 @@ mod tests {
             command_dir: dir.path(),
             user_env: &user_env,
             allow_external_paths: true,
+            debug: false,
         };
         let path = resolve_script_path("${SCRIPTS}/run.sh", dir.path(), &env).unwrap();
         assert_eq!(path, PathBuf::from("/opt/scripts/run.sh"));
@@ -2157,6 +2345,7 @@ mod tests {
             command_dir: dir.path(),
             user_env: &user_env,
             allow_external_paths: false,
+            debug: false,
         };
         let result = resolve_script_path("${SCRIPTS}/run.sh", dir.path(), &env);
         assert!(result.is_err());
@@ -2176,6 +2365,7 @@ mod tests {
             command_dir: dir.path(),
             user_env: &HashMap::new(),
             allow_external_paths: false,
+            debug: false,
         };
         // ${NIMBLE_COMMAND_DIR}/hello.sh should still work — it resolves inside command_dir.
         let path = resolve_script_path("${NIMBLE_COMMAND_DIR}/hello.sh", dir.path(), &env).unwrap();
@@ -2195,6 +2385,7 @@ mod tests {
             command_dir: dir.path(),
             user_env: &HashMap::new(),
             allow_external_paths: false,
+            debug: false,
         };
         let path = resolve_script_path("${NIMBLE_COMMANDS_ROOT}/shared.sh", dir.path(), &env).unwrap();
         assert_eq!(path, dir.path().join("shared.sh"));
@@ -2230,6 +2421,7 @@ mod tests {
             command_dir: dir.path(),
             user_env: &user_env,
             allow_external_paths: true,
+            debug: false,
         };
         let path = resolve_list_path("${LISTS}/team.tsv", dir.path(), &env).unwrap();
         assert_eq!(path, PathBuf::from("/shared/lists/team.tsv"));
@@ -2248,6 +2440,7 @@ mod tests {
             command_dir: dir.path(),
             user_env: &user_env,
             allow_external_paths: true,
+            debug: false,
         };
         let path = resolve_list_path("${LISTS}/team", dir.path(), &env).unwrap();
         assert_eq!(path, PathBuf::from("/shared/team.tsv"));
@@ -2266,6 +2459,7 @@ mod tests {
             command_dir: dir.path(),
             user_env: &user_env,
             allow_external_paths: false,
+            debug: false,
         };
         let result = resolve_list_path("${LISTS}/team", dir.path(), &env);
         assert!(result.is_err());

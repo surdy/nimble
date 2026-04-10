@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onMount, tick } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
   import { getCurrentWindow, LogicalSize } from "@tauri-apps/api/window";
   import { listen, emit } from "@tauri-apps/api/event";
@@ -61,6 +61,11 @@
   let settingsSavedTimer: ReturnType<typeof setTimeout> | null = null;
   let settingsSaved = $state(false);
 
+  // Debug mode — toggled via /debug command, resets on app restart
+  let debugMode = $state(false);
+  // True when the list is showing debug log entries (special item selection)
+  let showingDebugLog = $state(false);
+
   // Built-in /ctx commands — always present, titles reflect current activeContext
   const builtinCommands: Command[] = $derived([
     {
@@ -117,12 +122,32 @@
       env: {}, source_dir: "",
       action: { type: "builtin", config: { action: "open_settings" } },
     },
+    {
+      phrase: "/debug",
+      title: debugMode ? "Turn off debug mode" : "Turn on debug mode",
+      env: {}, source_dir: "",
+      action: { type: "builtin", config: { action: "toggle_debug" } },
+    },
+    {
+      phrase: "/debug log",
+      title: "View debug log",
+      env: {}, source_dir: "",
+      action: { type: "builtin", config: { action: "show_debug_log" } },
+    },
+    {
+      phrase: "/debug log open",
+      title: "Open debug log in editor",
+      env: {}, source_dir: "",
+      action: { type: "builtin", config: { action: "open_debug_log" } },
+    },
   ]);
 
   // List expansion state — populated when input exactly matches a static_list phrase
   let listItems = $state<ListItem[]>([]);
   let activeListCmd = $state<Command | null>(null);
   let dynamicListLoaded = $state(false); // true once a dynamic_list invoke has resolved
+  // Inline error from script_action execution (shown as an error row in the results area)
+  let actionError = $state<string | null>(null);
   let resultsEl: HTMLDivElement | undefined = $state();
 
   // ── Filtering & navigation ─────────────────────────────────────────────
@@ -228,6 +253,7 @@
   $effect(() => {
     void allFiltered;
     selectedIndex = 0;
+    actionError = null;
   });
 
   // Scroll the selected row into view when navigating with arrow keys
@@ -255,7 +281,9 @@
       activeListCmd = staticMatch;
       invoke<ListItem[]>("load_list", { commandDir, listName, inlineEnv: staticMatch.env, context: activeContext, phrase: staticMatch.phrase })
         .then(items => { listItems = items; selectedIndex = 0; })
-        .catch(() => { listItems = []; });
+        .catch((err) => {
+          listItems = [{ title: "⚠️ Error loading list", subtext: String(err) }];
+        });
       return;
     }
 
@@ -281,7 +309,10 @@
         dynamicListLoaded = false;
         invoke<ListItem[]>("run_dynamic_list", { commandDir, scriptName: config.script, arg, context: activeContext, phrase: dynMatch.phrase, inlineEnv: dynMatch.env })
           .then(items => { listItems = items; selectedIndex = 0; dynamicListLoaded = true; })
-          .catch(() => { listItems = []; dynamicListLoaded = true; });
+          .catch((err) => {
+            listItems = [{ title: "⚠️ Script error", subtext: String(err) }];
+            dynamicListLoaded = true;
+          });
       };
 
       if (argMode === "none") {
@@ -319,6 +350,7 @@
     activeListCmd = null;
     listItems = [];
     dynamicListLoaded = false;
+    showingDebugLog = false;
   });
 
   // Resize window to fit current results (skip during onboarding or settings)
@@ -327,12 +359,22 @@
     const hasQuery = input.trim() !== "";
     const WARNING_H = 40;
     const warnExtra = warningVisible ? WARNING_H : 0;
+    const hasErrorItem = (showingList && listItems.some(it => it.title.startsWith("\u26a0"))) || actionError !== null;
     const listRowCount = showingList ? (listItems.length > 0 ? Math.min(listItems.length, MAX_RESULTS) : 1) : 0;
     const contentHeight = !hasQuery ? 0
       : showingList ? listRowCount * ROW_H
-      : allFiltered.length === 0 ? 44          // "no results" row
+      : actionError ? 44                       // action error row (measured below)
+      : allFiltered.length === 0 ? 44          // "no matching commands" row
       : Math.min(allFiltered.length, MAX_RESULTS) * ROW_H;
-    appWindow.setSize(new LogicalSize(640, 64 + warnExtra + contentHeight));
+    if (hasErrorItem) {
+      // Error items wrap text, so measure actual rendered height after DOM update
+      tick().then(() => {
+        const measured = resultsEl?.scrollHeight ?? contentHeight;
+        appWindow.setSize(new LogicalSize(640, 64 + warnExtra + measured));
+      });
+    } else {
+      appWindow.setSize(new LogicalSize(640, 64 + warnExtra + contentHeight));
+    }
   });
 
   // ── Highlight helper ──────────────────────────────────────────────────
@@ -501,6 +543,21 @@
 
   // ── Action execution ──────────────────────────────────────────────────
   async function executeListItem(item: ListItem) {
+    // Error items: copy the error message to clipboard
+    if (item.title.startsWith("\u26a0") && item.subtext) {
+      await invoke("copy_text", { text: item.subtext });
+      return;
+    }
+    // Debug log: first item opens the log file in the system editor
+    if (showingDebugLog) {
+      if (item.title.startsWith("📂")) {
+        await invoke("open_debug_log").catch(() => {});
+      }
+      showingDebugLog = false;
+      input = "";
+      invoke("dismiss_launcher").catch(() => appWindow.hide());
+      return;
+    }
     const value = item.subtext ?? item.title;
     const itemAction =
       activeListCmd?.action.type === "static_list"
@@ -567,14 +624,20 @@
       }
       // arg === "none" (or absent): scriptArg stays null
 
-      const values: string[] = await invoke("run_script_action", {
-        commandDir: cmd.source_dir,
-        scriptName: cfg.script,
-        arg: scriptArg,
-        context: activeContext,
-        phrase: cmd.phrase,
-        inlineEnv: cmd.env,
-      });
+      let values: string[];
+      try {
+        values = await invoke("run_script_action", {
+          commandDir: cmd.source_dir,
+          scriptName: cfg.script,
+          arg: scriptArg,
+          context: activeContext,
+          phrase: cmd.phrase,
+          inlineEnv: cmd.env,
+        });
+      } catch (err) {
+        actionError = String(err);
+        return;
+      }
 
       if (cfg.result_action === "open_url") {
         for (const v of values) {
@@ -629,6 +692,42 @@
         }
       } else if (builtinAction === "open_settings") {
         openSettings();
+      } else if (builtinAction === "toggle_debug") {
+        try {
+          const nowOn = await invoke<boolean>("toggle_debug");
+          debugMode = nowOn;
+          input = "";
+          if (inputEl) inputEl.placeholder = nowOn ? "Debug mode ON" : "Debug mode OFF";
+          setTimeout(() => { if (inputEl) inputEl.placeholder = ""; }, 2000);
+        } catch (err) {
+          input = "";
+          if (inputEl) inputEl.placeholder = `Error: ${err}`;
+          setTimeout(() => { if (inputEl) inputEl.placeholder = ""; }, 3000);
+        }
+      } else if (builtinAction === "show_debug_log") {
+        try {
+          const log = await invoke<string>("read_debug_log");
+          input = "";
+          const lines = log.trim().split("\n").filter((l: string) => l.length > 0);
+          if (lines.length === 0) {
+            listItems = [{ title: "Debug log is empty", subtext: "Turn on debug mode with /debug, then run some commands" }];
+          } else {
+            const openItem: ListItem = { title: "📂 Open debug log in editor", subtext: undefined };
+            const logItems: ListItem[] = lines.reverse().map((line: string) => {
+              const match = line.match(/^\[[\d:.]+\]\s*(.*)/);
+              return { title: match ? match[1] : line, subtext: undefined };
+            });
+            listItems = [openItem, ...logItems];
+          }
+          selectedIndex = 0;
+          showingDebugLog = true;
+        } catch (err) {
+          listItems = [{ title: "⚠️ Error reading debug log", subtext: String(err) }];
+        }
+      } else if (builtinAction === "open_debug_log") {
+        await invoke("open_debug_log").catch(() => {});
+        input = "";
+        dismissWithFocusRestore();
       }
     }
   }
@@ -697,6 +796,9 @@
       const savedContext = await invoke<string>("load_context").catch(() => "");
       if (savedContext) activeContext = savedContext;
 
+      // Sync debug mode state from backend (session-scoped, not persisted).
+      debugMode = await invoke<boolean>("is_debug").catch(() => false);
+
       // One-time migration: if the backend has no hotkey saved yet, check
       // localStorage for a legacy key written by an older version of the app.
       let resolvedHotkey = appSettings.hotkey;
@@ -749,7 +851,7 @@
           const commandDir = activeListCmd.source_dir;
           invoke<ListItem[]>("load_list", { commandDir, listName, inlineEnv: activeListCmd.env, context: activeContext, phrase: activeListCmd.phrase })
             .then(items => { listItems = items; })
-            .catch(() => { listItems = []; });
+            .catch((err) => { listItems = [{ title: "⚠️ Error loading list", subtext: String(err) }]; });
         } else if (activeListCmd && activeListCmd.action.type === "dynamic_list") {
           const config = activeListCmd.action.config;
           const typed = input.trim().toLowerCase();
@@ -757,7 +859,7 @@
           const suffix = typed.startsWith(phrase + " ") ? typed.slice(phrase.length + 1).trim() : "";
           invoke<ListItem[]>("run_dynamic_list", { commandDir: activeListCmd.source_dir, scriptName: config.script, arg: suffix || null, context: activeContext, phrase: activeListCmd.phrase, inlineEnv: activeListCmd.env })
             .then(items => { listItems = items; })
-            .catch(() => { listItems = []; });
+            .catch((err) => { listItems = [{ title: "⚠️ Script error", subtext: String(err) }]; });
         }
       });
 
@@ -967,6 +1069,9 @@
           >&times;</button>
         </div>
       {/if}
+      {#if debugMode}
+        <span class="debug-badge">DEBUG</span>
+      {/if}
     </div>
 
     {#if warningVisible}
@@ -990,6 +1095,7 @@
               <div
                 class="result-row"
                 class:selected={i === selectedIndex}
+                class:error-item={item.title.startsWith("\u26a0")}
                 onmouseenter={() => (selectedIndex = i)}
                 onmousedown={(e) => { e.preventDefault(); selectedIndex = i; }}
                 onclick={() => executeListItem(item)}
@@ -1003,8 +1109,15 @@
               </div>
             {/each}
           {/if}
+        {:else if actionError}
+          <div class="result-row error-item">
+            <div class="result-content">
+              <span class="result-title">⚠️ Action error</span>
+              <span class="result-subtext">{actionError}</span>
+            </div>
+          </div>
         {:else if allFiltered.length === 0}
-          <div class="no-results">No results</div>
+          <div class="no-results">No matching commands</div>
         {:else}
           {#each allFiltered as cmd, i}
             {@const rawTyped   = input.trim()}
@@ -1128,6 +1241,19 @@
     padding: 3px 6px 3px 10px;
     flex-shrink: 0;
     max-width: 180px;
+  }
+
+  .debug-badge {
+    color: #ff9f0a;
+    font-size: 10px;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    font-weight: 700;
+    letter-spacing: 0.5px;
+    background: rgba(255, 159, 10, 0.15);
+    border: 1px solid rgba(255, 159, 10, 0.4);
+    border-radius: 4px;
+    padding: 2px 6px;
+    flex-shrink: 0;
   }
 
   .chip-label {
@@ -1291,6 +1417,14 @@
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
+  }
+
+  .error-item .result-title,
+  .error-item .result-subtext {
+    white-space: normal;
+    overflow: visible;
+    text-overflow: unset;
+    word-break: break-word;
   }
 
   .result-subtext mark {
