@@ -115,3 +115,15 @@ action:
 Save the file. Within 300 ms Nimble reloads automatically. Invoke the launcher and start typing `open github` — the result appears as you type. Press `Enter` or click it to open the URL in your browser.
 
 That one file is all it takes. Every other action type (`paste_text`, `copy_text`, `static_list`, `dynamic_list`, `script_action`) follows the same pattern — just a different `action` block. See [Actions](actions/README.md) to continue.
+
+---
+
+## Troubleshooting
+
+If something doesn't work as expected, the launcher tells you why:
+
+- **"No matching commands"** — nothing matched what you typed. Check your spelling or verify the command file exists in your `commands/` directory.
+- **⚠️ error items** — the command was found but something failed (missing file, script crash, permission error). The error message is shown directly — press Enter to copy it.
+- **"No results"** — the command ran successfully but returned nothing. This is normal for scripts/lists with no data.
+
+For deeper diagnostics, type `/debug` to enable debug mode and `/debug log` to inspect the detailed session log. See [Debugging](guides/debugging.md) for the full guide.

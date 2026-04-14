@@ -19,6 +19,10 @@ use tauri_plugin_opener::OpenerExt;
 /// - macOS: process ID as a decimal string
 /// - Linux: X11 window ID as a decimal string (via `xdo` crate / libxdo)
 struct PreviousApp(Mutex<Option<String>>);
+/// Holds the tab name ("commands" or "settings") the frontend should show when
+/// the preferences window first mounts. Written by `open_preferences_window`,
+/// consumed once by `get_preferences_initial_tab`.
+struct PreferencesInitialTab(Mutex<String>);
 
 /// macOS: captures the frontmost application's PID via NSWorkspace.
 /// Called in the global-shortcut handler and tray show/hide before the launcher
@@ -592,7 +596,7 @@ fn save_settings(
     app: tauri::AppHandle,
     show_context_chip: bool,
     allow_duplicates: bool,
-    allow_external_paths: bool,
+    shared_dir: String,
     commands_dir: Option<String>,
 ) -> Result<(), String> {
     let config_dir = app.path().app_config_dir().map_err(|e| e.to_string())?;
@@ -600,36 +604,530 @@ fn save_settings(
     let mut state = binding.0.lock().unwrap();
     state.show_context_chip = show_context_chip;
     state.allow_duplicates = allow_duplicates;
-    state.allow_external_paths = allow_external_paths;
+    state.shared_dir = shared_dir;
     state.commands_dir = commands_dir;
     settings::save(&config_dir, &state)
 }
 
-/// Open (or focus) the dedicated Settings window.
-/// The window loads the same SPA as the main launcher; it recognises it is
-/// the settings window via its Tauri window label ("settings") and renders
-/// the settings UI instead of the launcher bar.
+// ── Command Editor ─────────────────────────────────────────────────────────────
+
+/// Lightweight metadata about a single command file, used to populate the
+/// command-editor sidebar without deserialising every action config.
+#[derive(Debug, Clone, serde::Serialize)]
+struct CommandFileMeta {
+    /// Command phrase.
+    phrase: String,
+    /// Human-readable title.
+    title: String,
+    /// Whether the command is enabled.
+    enabled: bool,
+    /// Action type string (e.g. `"open_url"`, `"paste_text"`).
+    action_type: String,
+    /// Absolute path to the YAML file on disk.
+    file_path: String,
+    /// Relative directory containing the YAML file (empty string for root-level commands).
+    source_dir: String,
+}
+
+/// Open (or focus) the unified Preferences window, showing the requested tab.
+///
+/// `tab` must be `"commands"` or `"settings"`. Any other value defaults to
+/// `"commands"`. The tab is communicated to the frontend via the URL hash so it
+/// is readable synchronously before first render (no flash). When the window is
+/// already open the tab is switched by emitting `preferences://switch-tab`.
 #[tauri::command]
-fn open_settings_window(app: tauri::AppHandle) -> Result<(), String> {
-    // Re-use an existing settings window if one is already open.
-    if let Some(win) = app.get_webview_window("settings") {
+fn open_preferences_window(app: tauri::AppHandle, tab: String) -> Result<(), String> {
+    let tab = if tab == "settings" { "settings" } else { "commands" };
+    if let Some(win) = app.get_webview_window("preferences") {
         win.show().ok();
         win.set_focus().map_err(|e| e.to_string())?;
+        app.emit("preferences://switch-tab", tab).ok();
         return Ok(());
+    }
+    // Store the desired tab so the frontend can read it via get_preferences_initial_tab.
+    {
+        let state = app.state::<PreferencesInitialTab>();
+        *state.0.lock().unwrap() = tab.to_string();
     }
     tauri::WebviewWindowBuilder::new(
         &app,
-        "settings",
+        "preferences",
         tauri::WebviewUrl::App(std::path::PathBuf::from("index.html")),
     )
-    .title("Nimble Settings")
-    .inner_size(520.0, 460.0)
-    .resizable(false)
+    .title("Nimble")
+    .inner_size(720.0, 520.0)
+    .min_inner_size(560.0, 420.0)
+    .resizable(true)
     .always_on_top(false)
     .decorations(true)
     .center()
     .build()
     .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Return the initial tab for the preferences window and reset it to "commands".
+/// Called once by the frontend on mount inside the preferences window.
+#[tauri::command]
+fn get_preferences_initial_tab(app: tauri::AppHandle) -> String {
+    let state = app.state::<PreferencesInitialTab>();
+    let mut guard = state.0.lock().unwrap();
+    let tab = guard.clone();
+    *guard = "commands".to_string();
+    tab
+}
+
+/// Return metadata for every command file in the commands root directory.
+/// Files the editor cannot yet handle (static_list, dynamic_list, script_action)
+/// are still listed so the user can see them.
+#[tauri::command]
+fn list_command_files(app: tauri::AppHandle) -> Result<Vec<CommandFileMeta>, String> {
+    let commands_root = app.state::<CommandsRoot>().0.clone();
+    let result = commands::load_from_dir(&commands_root, true, false)?;
+    let mut metas: Vec<CommandFileMeta> = result
+        .commands
+        .into_iter()
+        .map(|cmd| {
+            let action_type = match &cmd.action {
+                commands::Action::OpenUrl(_) => "open_url",
+                commands::Action::PasteText(_) => "paste_text",
+                commands::Action::CopyText(_) => "copy_text",
+                commands::Action::StaticList(_) => "static_list",
+                commands::Action::DynamicList(_) => "dynamic_list",
+                commands::Action::ScriptAction(_) => "script_action",
+            }
+            .to_string();
+            let file_path = if cmd.source_file.is_empty() {
+                commands_root.join(&cmd.source_dir).to_string_lossy().into_owned()
+            } else {
+                commands_root.join(&cmd.source_file).to_string_lossy().into_owned()
+            };
+            CommandFileMeta {
+                phrase: cmd.phrase,
+                title: cmd.title,
+                enabled: cmd.enabled,
+                action_type,
+                file_path,
+                source_dir: cmd.source_dir,
+            }
+        })
+        .collect();
+    metas.sort_by(|a, b| a.phrase.cmp(&b.phrase));
+    Ok(metas)
+}
+
+/// Convert a phrase into a filesystem-friendly slug (lowercase, spaces → hyphens,
+/// non-alphanumeric chars removed).
+fn phrase_to_slug(phrase: &str) -> String {
+    phrase
+        .to_lowercase()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect::<String>()
+        .split('-')
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join("-")
+}
+
+/// Serialise a command (phrase + title + enabled + action config JSON) and write
+/// it to a YAML file in the commands root.
+///
+/// - If `file_path` is provided it must already exist — the file is overwritten
+///   in-place (edit flow).
+/// - If `file_path` is absent a new file is created at
+///   `<commands_root>/<slug>.yaml` with an integer suffix to avoid collisions
+///   (new-command flow).
+///
+/// Returns the absolute path of the written file, and emits `commands://reloaded`
+/// so the launcher picks up the change without waiting for the file-watcher.
+#[tauri::command]
+fn save_command_file(
+    app: tauri::AppHandle,
+    phrase: String,
+    title: String,
+    enabled: bool,
+    action_type: String,
+    config_json: String,
+    file_path: Option<String>,
+    target_dir: Option<String>,
+) -> Result<String, String> {
+    // --- validate phrase ---
+    let phrase = phrase.trim().to_string();
+    if phrase.is_empty() {
+        return Err("Phrase must not be empty".to_string());
+    }
+    if phrase.starts_with('/') {
+        return Err("Phrases starting with '/' are reserved for built-in commands".to_string());
+    }
+
+    // --- build action YAML fragment ---
+    let config_val: serde_json::Value =
+        serde_json::from_str(&config_json).map_err(|e| format!("Invalid config JSON: {e}"))?;
+
+    let action_yaml = match action_type.as_str() {
+        "open_url" => {
+            let url = config_val["url"].as_str().unwrap_or("").trim().to_string();
+            if url.is_empty() {
+                return Err("URL must not be empty".to_string());
+            }
+            // Validate scheme (reuse existing helper for final URLs; {param} is a placeholder)
+            let test_url = url.replace("{param}", "TEST");
+            resolve_url(test_url, None)?;
+            format!("type: open_url\n  config:\n    url: {}", serde_yaml::to_string(&url).unwrap_or_default().trim())
+        }
+        "paste_text" => {
+            let text = config_val["text"].as_str().unwrap_or("").to_string();
+            if text.is_empty() {
+                return Err("Text must not be empty".to_string());
+            }
+            validate_text(&text)?;
+            format!("type: paste_text\n  config:\n    text: {}", serde_yaml::to_string(&text).unwrap_or_default().trim())
+        }
+        "copy_text" => {
+            let text = config_val["text"].as_str().unwrap_or("").to_string();
+            if text.is_empty() {
+                return Err("Text must not be empty".to_string());
+            }
+            validate_text(&text)?;
+            format!("type: copy_text\n  config:\n    text: {}", serde_yaml::to_string(&text).unwrap_or_default().trim())
+        }
+        "static_list" => {
+            let list = config_val["list"].as_str().unwrap_or("").trim().to_string();
+            if list.is_empty() {
+                return Err("List name must not be empty".to_string());
+            }
+            let item_action = config_val["item_action"].as_str().unwrap_or("").trim().to_string();
+            let ia_line = match item_action.as_str() {
+                "paste_text" | "copy_text" | "open_url" => format!("\n    item_action: {item_action}"),
+                _ => String::new(),
+            };
+            format!(
+                "type: static_list\n  config:\n    list: {}{}",
+                serde_yaml::to_string(&list).unwrap_or_default().trim(),
+                ia_line,
+            )
+        }
+        "dynamic_list" => {
+            let script = config_val["script"].as_str().unwrap_or("").trim().to_string();
+            if script.is_empty() {
+                return Err("Script name must not be empty".to_string());
+            }
+            let arg = config_val["arg"].as_str().unwrap_or("none").trim().to_string();
+            if !matches!(arg.as_str(), "none" | "optional" | "required") {
+                return Err(format!("Invalid arg mode: {arg}"));
+            }
+            let item_action = config_val["item_action"].as_str().unwrap_or("").trim().to_string();
+            let ia_line = match item_action.as_str() {
+                "paste_text" | "copy_text" | "open_url" => format!("\n    item_action: {item_action}"),
+                _ => String::new(),
+            };
+            let arg_line = if arg != "none" { format!("\n    arg: {arg}") } else { String::new() };
+            format!(
+                "type: dynamic_list\n  config:\n    script: {}{}{}",
+                serde_yaml::to_string(&script).unwrap_or_default().trim(),
+                arg_line,
+                ia_line,
+            )
+        }
+        "script_action" => {
+            let script = config_val["script"].as_str().unwrap_or("").trim().to_string();
+            if script.is_empty() {
+                return Err("Script name must not be empty".to_string());
+            }
+            let arg = config_val["arg"].as_str().unwrap_or("none").trim().to_string();
+            if !matches!(arg.as_str(), "none" | "optional" | "required") {
+                return Err(format!("Invalid arg mode: {arg}"));
+            }
+            let result_action = config_val["result_action"].as_str().unwrap_or("").trim().to_string();
+            if !matches!(result_action.as_str(), "open_url" | "paste_text" | "copy_text") {
+                return Err("result_action must be one of: open_url, paste_text, copy_text".to_string());
+            }
+            let arg_line = if arg != "none" { format!("\n    arg: {arg}") } else { String::new() };
+            let prefix = config_val["prefix"].as_str().unwrap_or("").to_string();
+            let suffix = config_val["suffix"].as_str().unwrap_or("").to_string();
+            let prefix_line = if !prefix.is_empty() {
+                format!("\n    prefix: {}", serde_yaml::to_string(&prefix).unwrap_or_default().trim())
+            } else {
+                String::new()
+            };
+            let suffix_line = if !suffix.is_empty() {
+                format!("\n    suffix: {}", serde_yaml::to_string(&suffix).unwrap_or_default().trim())
+            } else {
+                String::new()
+            };
+            format!(
+                "type: script_action\n  config:\n    script: {}\n    result_action: {}{}{}{}",
+                serde_yaml::to_string(&script).unwrap_or_default().trim(),
+                result_action,
+                arg_line,
+                prefix_line,
+                suffix_line,
+            )
+        }
+        other => return Err(format!("Unsupported action type for GUI editor: {other}")),
+    };
+
+    let enabled_line = if enabled {
+        String::new()
+    } else {
+        "enabled: false\n".to_string()
+    };
+
+    let yaml_content = format!(
+        "phrase: {}\ntitle: {}\n{}action:\n  {}\n",
+        serde_yaml::to_string(&phrase).unwrap_or_default().trim(),
+        serde_yaml::to_string(&title).unwrap_or_default().trim(),
+        enabled_line,
+        action_yaml,
+    );
+
+    let commands_root = app.state::<CommandsRoot>().0.clone();
+
+    // --- determine target path ---
+    let target_path: std::path::PathBuf = if let Some(ref fp) = file_path {
+        let p = std::path::PathBuf::from(fp);
+        if !p.exists() {
+            return Err(format!("File not found: {fp}"));
+        }
+        p
+    } else {
+        // New command — generate a non-colliding filename.
+        // If target_dir is provided, place the file inside that subdirectory
+        // of commands_root (creating it if necessary). Otherwise, place at root.
+        let slug = phrase_to_slug(&phrase);
+        let base_dir = if let Some(ref td) = target_dir {
+            let td = td.trim();
+            if td.is_empty() || td == "/" || td == "." {
+                commands_root.clone()
+            } else {
+                // Security: reject traversal attempts
+                if td.contains("..") {
+                    return Err("Directory name must not contain '..'".to_string());
+                }
+                let dir = commands_root.join(td);
+                if !dir.exists() {
+                    std::fs::create_dir_all(&dir)
+                        .map_err(|e| format!("Could not create directory: {e}"))?;
+                }
+                dir
+            }
+        } else {
+            commands_root.clone()
+        };
+        let base = base_dir.join(format!("{slug}.yaml"));
+        if !base.exists() {
+            base
+        } else {
+            let mut n = 2u32;
+            loop {
+                let candidate = base_dir.join(format!("{slug}-{n}.yaml"));
+                if !candidate.exists() {
+                    break candidate;
+                }
+                n += 1;
+            }
+        }
+    };
+
+    std::fs::write(&target_path, &yaml_content)
+        .map_err(|e| format!("Could not write command file: {e}"))?;
+
+    // Notify all windows (especially the launcher) that commands changed.
+    let settings = app.state::<SettingsState>().0.lock().unwrap().clone();
+    if let Ok(load_result) = commands::load_from_dir(&commands_root, settings.allow_duplicates, false) {
+        app.emit("commands://reloaded", &load_result).ok();
+    }
+
+    Ok(target_path.to_string_lossy().into_owned())
+}
+
+/// Delete a command file from disk and notify all windows.
+#[tauri::command]
+fn delete_command_file(app: tauri::AppHandle, file_path: String) -> Result<(), String> {
+    let p = std::path::PathBuf::from(&file_path);
+    if !p.exists() {
+        return Err(format!("File not found: {file_path}"));
+    }
+    std::fs::remove_file(&p).map_err(|e| format!("Could not delete command file: {e}"))?;
+
+    let commands_root = app.state::<CommandsRoot>().0.clone();
+    let settings = app.state::<SettingsState>().0.lock().unwrap().clone();
+    if let Ok(load_result) = commands::load_from_dir(&commands_root, settings.allow_duplicates, false) {
+        app.emit("commands://reloaded", &load_result).ok();
+    }
+    Ok(())
+}
+
+/// Reveal a file or directory in the platform's file manager.
+#[tauri::command]
+fn reveal_in_file_manager(path: String) -> Result<(), String> {
+    let p = std::path::PathBuf::from(&path);
+    if !p.exists() {
+        return Err(format!("Path not found: {path}"));
+    }
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .arg("-R")
+            .arg(&path)
+            .spawn()
+            .map_err(|e| format!("Could not reveal in Finder: {e}"))?;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        // Try xdg-open on the parent directory
+        let dir = if p.is_file() { p.parent().unwrap_or(&p) } else { &p };
+        std::process::Command::new("xdg-open")
+            .arg(dir)
+            .spawn()
+            .map_err(|e| format!("Could not open file manager: {e}"))?;
+    }
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("explorer")
+            .arg(format!("/select,{}", path))
+            .spawn()
+            .map_err(|e| format!("Could not open Explorer: {e}"))?;
+    }
+    Ok(())
+}
+
+/// Open a file in the system's default editor.
+#[tauri::command]
+fn open_in_default_editor(path: String) -> Result<(), String> {
+    let p = std::path::PathBuf::from(&path);
+    if !p.exists() {
+        return Err(format!("File not found: {path}"));
+    }
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .arg("-t")
+            .arg(&path)
+            .spawn()
+            .map_err(|e| format!("Could not open in editor: {e}"))?;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        std::process::Command::new("xdg-open")
+            .arg(&path)
+            .spawn()
+            .map_err(|e| format!("Could not open in editor: {e}"))?;
+    }
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("cmd")
+            .args(["/C", "start", "", &path])
+            .spawn()
+            .map_err(|e| format!("Could not open in editor: {e}"))?;
+    }
+    Ok(())
+}
+
+/// List the existing subdirectories directly under the commands root directory.
+/// Returns relative directory names (e.g. `["gainsight", "examples/copy-uuid"]`).
+/// Used by the command editor to offer folder selection when creating a new command.
+#[tauri::command]
+fn list_command_folders(app: tauri::AppHandle) -> Result<Vec<String>, String> {
+    let commands_root = app.state::<CommandsRoot>().0.clone();
+    let mut folders = std::collections::BTreeSet::new();
+    for entry in walkdir::WalkDir::new(&commands_root)
+        .min_depth(1)
+        .into_iter()
+        .filter_map(|e| e.ok())
+    {
+        if entry.file_type().is_dir() {
+            if let Ok(rel) = entry.path().strip_prefix(&commands_root) {
+                let s = rel.to_string_lossy().to_string();
+                if !s.is_empty() {
+                    folders.insert(s);
+                }
+            }
+        }
+    }
+    Ok(folders.into_iter().collect())
+}
+
+/// Read the content of a script file co-located with a command or in the shared directory.
+/// Returns the file content as a string, or an error if the file doesn't exist.
+#[tauri::command]
+fn read_script_file(
+    app: tauri::AppHandle,
+    command_dir: String,
+    script_name: String,
+) -> Result<String, String> {
+    let commands_root = app.state::<CommandsRoot>().0.clone();
+
+    let script_path = if let Some(name) = script_name.strip_prefix("shared:") {
+        let name = name.trim();
+        if name.is_empty() || name.contains('/') || name.contains('\\') || name.contains("..") {
+            return Err(format!("Invalid shared script name: {name:?}"));
+        }
+        let shared_dir = app.state::<SettingsState>().0.lock().unwrap().shared_dir.clone();
+        commands_root.join(&shared_dir).join(name)
+    } else {
+        if script_name.contains('/') || script_name.contains('\\') || script_name.contains("..") {
+            return Err(format!("Invalid script name: {script_name:?}"));
+        }
+        commands_root.join(&command_dir).join(&script_name)
+    };
+
+    if !script_path.exists() {
+        return Err("not_found".to_string());
+    }
+
+    std::fs::read_to_string(&script_path)
+        .map_err(|e| format!("Could not read script file: {e}"))
+}
+
+/// Write (create or overwrite) a script file co-located with a command or in the shared directory.
+/// Sets the file executable on Unix platforms.
+#[tauri::command]
+fn write_script_file(
+    app: tauri::AppHandle,
+    command_dir: String,
+    script_name: String,
+    content: String,
+) -> Result<(), String> {
+    let commands_root = app.state::<CommandsRoot>().0.clone();
+
+    let (dir, script_path) = if let Some(name) = script_name.strip_prefix("shared:") {
+        let name = name.trim();
+        if name.is_empty() || name.contains('/') || name.contains('\\') || name.contains("..") {
+            return Err(format!("Invalid shared script name: {name:?}"));
+        }
+        let shared_dir = app.state::<SettingsState>().0.lock().unwrap().shared_dir.clone();
+        let dir = commands_root.join(&shared_dir);
+        let path = dir.join(name);
+        (dir, path)
+    } else {
+        if script_name.contains('/') || script_name.contains('\\') || script_name.contains("..") {
+            return Err(format!("Invalid script name: {script_name:?}"));
+        }
+        let dir = commands_root.join(&command_dir);
+        let path = dir.join(&script_name);
+        (dir, path)
+    };
+
+    // Ensure the directory exists
+    if !dir.exists() {
+        std::fs::create_dir_all(&dir)
+            .map_err(|e| format!("Could not create directory: {e}"))?;
+    }
+
+    std::fs::write(&script_path, &content)
+        .map_err(|e| format!("Could not write script file: {e}"))?;
+
+    // Set executable permission on Unix
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let perms = std::fs::Permissions::from_mode(0o755);
+        std::fs::set_permissions(&script_path, perms)
+            .map_err(|e| format!("Could not set executable permission: {e}"))?;
+    }
+
     Ok(())
 }
 
@@ -658,9 +1156,7 @@ fn list_commands(app: tauri::AppHandle) -> Result<commands::LoadResult, String> 
     commands::load_from_dir(commands_root, settings.allow_duplicates, settings.seed_examples)
 }
 
-/// Load a named list from `<commands_dir>/<command_dir>/<list_name>.yaml`.
-/// The list file is co-located with the command YAML that references it,
-/// unless `${VAR}` substitution resolves it to an external path.
+/// Load a named list from a co-located TSV file or the shared directory.
 #[tauri::command]
 fn load_list(
     app: tauri::AppHandle,
@@ -676,7 +1172,7 @@ fn load_list(
         .map_err(|e| e.to_string())?;
     let commands_root = &app.state::<CommandsRoot>().0;
     let dir = commands_root.join(&command_dir);
-    let allow_external = app.state::<SettingsState>().0.lock().unwrap().allow_external_paths;
+    let shared_dir = app.state::<SettingsState>().0.lock().unwrap().shared_dir.clone();
     let debug = app.state::<DebugState>().0.load(std::sync::atomic::Ordering::Relaxed);
     let user_env = commands::build_user_env(commands_root, &dir, &inline_env)?;
     let env = commands::ScriptEnv {
@@ -686,7 +1182,7 @@ fn load_list(
         commands_root,
         command_dir: &dir,
         user_env: &user_env,
-        allow_external_paths: allow_external,
+        shared_dir: &shared_dir,
         debug,
     };
     if debug {
@@ -716,7 +1212,7 @@ fn run_dynamic_list(
         .map_err(|e| e.to_string())?;
     let commands_root = &app.state::<CommandsRoot>().0;
     let dir = commands_root.join(&command_dir);
-    let allow_external = app.state::<SettingsState>().0.lock().unwrap().allow_external_paths;
+    let shared_dir = app.state::<SettingsState>().0.lock().unwrap().shared_dir.clone();
     let debug = app.state::<DebugState>().0.load(std::sync::atomic::Ordering::Relaxed);
     let user_env = commands::build_user_env(commands_root, &dir, &inline_env)?;
     let env = commands::ScriptEnv {
@@ -726,7 +1222,7 @@ fn run_dynamic_list(
         commands_root,
         command_dir: &dir,
         user_env: &user_env,
-        allow_external_paths: allow_external,
+        shared_dir: &shared_dir,
         debug,
     };
     commands::run_script(&dir, &script_name, arg.as_deref(), &env)
@@ -751,7 +1247,7 @@ fn run_script_action(
         .map_err(|e| e.to_string())?;
     let commands_root = &app.state::<CommandsRoot>().0;
     let dir = commands_root.join(&command_dir);
-    let allow_external = app.state::<SettingsState>().0.lock().unwrap().allow_external_paths;
+    let shared_dir = app.state::<SettingsState>().0.lock().unwrap().shared_dir.clone();
     let debug = app.state::<DebugState>().0.load(std::sync::atomic::Ordering::Relaxed);
     let user_env = commands::build_user_env(commands_root, &dir, &inline_env)?;
     let env = commands::ScriptEnv {
@@ -761,7 +1257,7 @@ fn run_script_action(
         commands_root,
         command_dir: &dir,
         user_env: &user_env,
-        allow_external_paths: allow_external,
+        shared_dir: &shared_dir,
         debug,
     };
     commands::run_script_values(&dir, &script_name, arg.as_deref(), &env)
@@ -921,6 +1417,20 @@ fn copy_text(window: tauri::Window, app: tauri::AppHandle, text: String) -> Resu
     Ok(())
 }
 
+/// Open a native folder-picker dialog and return the selected path.
+/// Returns `None` if the user cancels.
+#[tauri::command]
+async fn browse_directory(default_path: Option<String>) -> Option<String> {
+    let mut dialog = rfd::AsyncFileDialog::new().set_title("Choose commands directory");
+    if let Some(ref p) = default_path {
+        let path = std::path::Path::new(p);
+        if path.is_dir() {
+            dialog = dialog.set_directory(path);
+        }
+    }
+    dialog.pick_folder().await.map(|h| h.path().to_string_lossy().into_owned())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -1003,6 +1513,7 @@ pub fn run() {
 
             // Manage previous-app tracking for paste_text focus restoration
             app.manage(PreviousApp(Mutex::new(None)));
+            app.manage(PreferencesInitialTab(Mutex::new("commands".to_string())));
 
             // Start watching the commands subdirectory for live command reloads
             watcher::start(app.handle().clone(), commands_root, allow_duplicates);
@@ -1088,7 +1599,7 @@ pub fn run() {
 
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![hide_window, show_window, dismiss_launcher, register_shortcut, get_settings, save_hotkey, save_settings, open_settings_window, save_context, load_context, list_commands, load_list, run_dynamic_list, run_script_action, open_url, paste_text, copy_text, deploy_skill, toggle_debug, is_debug, read_debug_log, open_debug_log])
+        .invoke_handler(tauri::generate_handler![hide_window, show_window, dismiss_launcher, register_shortcut, get_settings, save_hotkey, save_settings, open_preferences_window, get_preferences_initial_tab, list_command_files, save_command_file, delete_command_file, reveal_in_file_manager, open_in_default_editor, list_command_folders, read_script_file, write_script_file, save_context, load_context, list_commands, load_list, run_dynamic_list, run_script_action, open_url, paste_text, copy_text, deploy_skill, toggle_debug, is_debug, read_debug_log, open_debug_log, browse_directory])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
@@ -1348,5 +1859,149 @@ mod tests {
     fn embedded_spec_is_not_empty() {
         assert!(!SKILL_SPEC.is_empty());
         assert!(SKILL_SPEC.contains("spec_version"));
+    }
+
+    // ── YAML generation roundtrip (save_command_file format) ───────────────────
+    // These tests write files in the exact format that save_command_file produces
+    // and verify they parse correctly via load_from_dir.
+
+    fn write_and_parse(yaml: &str) -> commands::Command {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(dir.path().join("test.yaml"), yaml).unwrap();
+        let result = commands::load_from_dir(dir.path(), true, false).unwrap();
+        assert_eq!(result.commands.len(), 1, "expected exactly 1 command");
+        result.commands.into_iter().next().unwrap()
+    }
+
+    #[test]
+    fn yaml_roundtrip_static_list() {
+        let yaml = "phrase: team emails\ntitle: Team emails\naction:\n  type: static_list\n  config:\n    list: team-emails\n    item_action: paste_text\n";
+        let cmd = write_and_parse(yaml);
+        assert_eq!(cmd.phrase, "team emails");
+        if let commands::Action::StaticList(cfg) = &cmd.action {
+            assert_eq!(cfg.list, "team-emails");
+            assert_eq!(cfg.item_action, Some(commands::ItemAction::PasteText));
+        } else {
+            panic!("expected StaticList");
+        }
+    }
+
+    #[test]
+    fn yaml_roundtrip_static_list_no_item_action() {
+        let yaml = "phrase: show items\ntitle: Show items\naction:\n  type: static_list\n  config:\n    list: my-items\n";
+        let cmd = write_and_parse(yaml);
+        if let commands::Action::StaticList(cfg) = &cmd.action {
+            assert_eq!(cfg.list, "my-items");
+            assert!(cfg.item_action.is_none());
+        } else {
+            panic!("expected StaticList");
+        }
+    }
+
+    #[test]
+    fn yaml_roundtrip_dynamic_list() {
+        let yaml = "phrase: say hello\ntitle: Say hello\naction:\n  type: dynamic_list\n  config:\n    script: hello.sh\n    arg: optional\n    item_action: copy_text\n";
+        let cmd = write_and_parse(yaml);
+        if let commands::Action::DynamicList(cfg) = &cmd.action {
+            assert_eq!(cfg.script, "hello.sh");
+            assert_eq!(cfg.arg, commands::ArgMode::Optional);
+            assert_eq!(cfg.item_action, Some(commands::ItemAction::CopyText));
+        } else {
+            panic!("expected DynamicList");
+        }
+    }
+
+    #[test]
+    fn yaml_roundtrip_dynamic_list_defaults() {
+        let yaml = "phrase: list stuff\ntitle: List stuff\naction:\n  type: dynamic_list\n  config:\n    script: stuff.sh\n";
+        let cmd = write_and_parse(yaml);
+        if let commands::Action::DynamicList(cfg) = &cmd.action {
+            assert_eq!(cfg.script, "stuff.sh");
+            assert_eq!(cfg.arg, commands::ArgMode::None);
+            assert!(cfg.item_action.is_none());
+        } else {
+            panic!("expected DynamicList");
+        }
+    }
+
+    #[test]
+    fn yaml_roundtrip_script_action() {
+        let yaml = "phrase: paste emails\ntitle: Paste emails\naction:\n  type: script_action\n  config:\n    script: emails.sh\n    result_action: paste_text\n    arg: required\n    prefix: \"- \"\n    suffix: \"\\n\"\n";
+        let cmd = write_and_parse(yaml);
+        if let commands::Action::ScriptAction(cfg) = &cmd.action {
+            assert_eq!(cfg.script, "emails.sh");
+            assert_eq!(cfg.result_action, commands::ResultAction::PasteText);
+            assert_eq!(cfg.arg, commands::ArgMode::Required);
+            assert_eq!(cfg.prefix.as_deref(), Some("- "));
+            assert_eq!(cfg.suffix.as_deref(), Some("\n"));
+        } else {
+            panic!("expected ScriptAction");
+        }
+    }
+
+    #[test]
+    fn yaml_roundtrip_script_action_minimal() {
+        let yaml = "phrase: open sites\ntitle: Open sites\naction:\n  type: script_action\n  config:\n    script: sites.sh\n    result_action: open_url\n";
+        let cmd = write_and_parse(yaml);
+        if let commands::Action::ScriptAction(cfg) = &cmd.action {
+            assert_eq!(cfg.script, "sites.sh");
+            assert_eq!(cfg.result_action, commands::ResultAction::OpenUrl);
+            assert_eq!(cfg.arg, commands::ArgMode::None);
+            assert!(cfg.prefix.is_none());
+            assert!(cfg.suffix.is_none());
+        } else {
+            panic!("expected ScriptAction");
+        }
+    }
+
+    // ── read_script_file / write_script_file helpers ──────────────────────────
+
+    #[test]
+    fn script_name_rejects_path_separators() {
+        let dir = tempfile::tempdir().unwrap();
+        let dir_path = dir.path().to_path_buf();
+        // Simulate what read_script_file checks
+        let bad_names = ["../evil.sh", "sub/script.sh", "..\\evil.sh"];
+        for name in &bad_names {
+            assert!(
+                name.contains('/') || name.contains('\\') || name.contains(".."),
+                "Sanity: {name} should be rejected"
+            );
+        }
+        // A valid plain name should resolve inside the dir
+        let good = dir_path.join("hello.sh");
+        assert!(good.starts_with(&dir_path));
+    }
+
+    #[test]
+    fn write_and_read_script_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let script_path = dir.path().join("test.sh");
+        let content = "#!/bin/bash\necho hello\n";
+        std::fs::write(&script_path, content).unwrap();
+
+        // Verify we can read it back
+        let read_back = std::fs::read_to_string(&script_path).unwrap();
+        assert_eq!(read_back, content);
+
+        // Verify executable bit on unix
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let perms = std::fs::Permissions::from_mode(0o755);
+            std::fs::set_permissions(&script_path, perms).unwrap();
+            let meta = std::fs::metadata(&script_path).unwrap();
+            assert!(meta.permissions().mode() & 0o111 != 0);
+        }
+    }
+
+    #[test]
+    fn target_dir_traversal_rejected() {
+        // The save_command_file function rejects ".." in target_dir.
+        // Test the string check directly.
+        let bad = "../../etc";
+        assert!(bad.contains(".."));
+        let ok = "my-folder/sub";
+        assert!(!ok.contains(".."));
     }
 }

@@ -55,9 +55,8 @@ export interface ListItem {
   subtext?: string;
 }
 
-/** Frontend-only built-in action config. Never appears in YAML files. */
 export interface BuiltinConfig {
-  action: "ctx_set" | "ctx_reset" | "docs_open" | "deploy_skill";
+  action: "ctx_set" | "ctx_reset" | "docs_open" | "deploy_skill" | "open_settings" | "open_commands" | "toggle_debug" | "show_debug_log" | "open_debug_log";
   /** URL to open when action is "docs_open". */
   url?: string;
 }
@@ -79,6 +78,8 @@ export interface Command {
   action: Action;
   /** Directory containing the command YAML, relative to commands root. Set at load time. */
   source_dir: string;
+  /** Path to the YAML file, relative to commands root. Set at load time. */
+  source_file: string;
 }
 
 export interface DuplicateWarning {
@@ -109,7 +110,20 @@ export interface AppSettings {
   hotkey?: string;
   show_context_chip: boolean;
   allow_duplicates: boolean;
-  allow_external_paths: boolean;
+  shared_dir: string;
   seed_examples: boolean;
   commands_dir?: string;
+}
+
+/** Metadata returned by list_command_files — one entry per YAML command file. */
+export interface CommandFileMeta {
+  phrase: string;
+  title: string;
+  enabled: boolean;
+  /** e.g. "open_url" | "paste_text" | "copy_text" | "static_list" | … */
+  action_type: string;
+  /** Absolute path to the YAML file on disk. */
+  file_path: string;
+  /** Relative directory containing the YAML file (empty string for root-level commands). */
+  source_dir: string;
 }

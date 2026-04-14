@@ -20,6 +20,7 @@ Nimble stores all per-user data in a single platform-specific config directory. 
 Nimble/
   settings.yaml     ← application settings (hotkey, show_context_chip, allow_duplicates)
   state.json        ← runtime state (active context); written automatically by Nimble
+  debug.log         ← debug session log; written when debug mode is active (via /debug)
   commands/         ← YAML command files (watched and hot-reloaded by Nimble)
     env.yaml        ← global user-defined environment variables for scripts (optional)
     examples/       ← seeded on first launch when seed_examples is true
@@ -48,9 +49,10 @@ show_context_chip: true
 # phrases in other files generate warnings. Default is true (all loaded).
 allow_duplicates: true
 
-# When false, ${VAR}-substituted script/list paths must resolve inside
-# the command directory. Default is true (external paths allowed).
-allow_external_paths: true
+# Name of the shared scripts/lists subdirectory inside the commands root.
+# Scripts and lists referenced with the shared: prefix resolve here.
+# Default is "shared".
+shared_dir: shared
 
 # When true, Nimble seeds example commands into an empty commands
 # directory on first launch. Default is false.
@@ -67,7 +69,7 @@ allow_external_paths: true
 
 **`allow_duplicates`** — When `true` (default), all command files are loaded regardless of phrase conflicts. Set to `false` to enable first-file-wins deduplication and surface warnings for any conflicting phrases. Takes effect on next relaunch.
 
-**`allow_external_paths`** — When `true` (default), `script:` and `list:` fields that use `${VAR}` substitution may resolve to paths outside the command directory. Set to `false` to restrict all resolved paths to the command directory. See [Writing Scripts — External scripts and lists](../guides/writing-scripts.md#external-scripts-and-lists).
+**`shared_dir`** — Name of the subdirectory under the commands root where shared scripts and lists live. Scripts and lists referenced with the `shared:` prefix (e.g. `script: shared:contacts.sh`) resolve to `<commands_root>/<shared_dir>/`. Defaults to `"shared"`. See [Writing Scripts — Shared scripts and lists](../guides/writing-scripts.md#shared-scripts-and-lists).
 
 **`commands_dir`** — An optional absolute path to load commands from instead of `<config_root>/commands/`. Useful for pointing Nimble at a git-managed dotfiles directory or a team-shared folder. When absent, Nimble uses the default `commands/` subdirectory. Relative paths are rejected (a warning is logged and the default is used). Takes effect on next relaunch.
 

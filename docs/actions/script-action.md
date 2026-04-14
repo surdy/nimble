@@ -18,7 +18,7 @@ action:
   type: script_action
   config:
     script: <string>      # script filename co-located with this YAML (no path separators),
-                          # or a ${VAR}-substituted path to an external script
+                          # or shared:<name> to reference a script in the shared directory
     arg: none | optional | required   # default: none
     result_action: open_url | paste_text | copy_text
     prefix: <string>      # optional — prepended to each value (paste_text / copy_text only)

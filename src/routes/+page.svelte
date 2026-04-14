@@ -3,7 +3,7 @@
   import { invoke } from "@tauri-apps/api/core";
   import { getCurrentWindow, LogicalSize } from "@tauri-apps/api/window";
   import { listen, emit } from "@tauri-apps/api/event";
-  import type { Action, AppSettings, Command, CommandsPayload, DuplicateWarning, ListItem, ReservedPhraseWarning } from "$lib/types";
+  import type { Action, AppSettings, Command, CommandFileMeta, CommandsPayload, DuplicateWarning, ListItem, ReservedPhraseWarning } from "$lib/types";
 
   // ── State ──────────────────────────────────────────────────────────────
   let input = $state("");
@@ -11,13 +11,19 @@
   let onboardingEl: HTMLDivElement | undefined = $state();
   const appWindow = getCurrentWindow();
 
-  // Detect whether we are running inside the dedicated settings window
-  // (label "settings") vs the main launcher window (label "main").
-  // This is synchronous so it affects initial render without any flash.
-  const isSettingsWindow = appWindow.label === "settings";
-  if (isSettingsWindow && typeof document !== "undefined") {
-    document.documentElement.classList.add("settings-window-mode");
+  // Detect whether we are running inside the unified Preferences window
+  // (label "preferences") vs the main launcher window (label "main").
+  // The active starting tab is read from the URL hash synchronously.
+  // This is all synchronous so it affects initial render without any flash.
+  const isPreferencesWindow = appWindow.label === "preferences";
+  if (isPreferencesWindow && typeof document !== "undefined") {
+    document.documentElement.classList.add("preferences-window-mode");
   }
+
+  // Active tab in the preferences window: "commands" or "settings".
+  // Initialised to "commands"; updated in onMount via get_preferences_initial_tab.
+  let activePreferencesTab = $state("commands");
+
 
   // Onboarding: shown on first launch until a shortcut is chosen
   let onboarding = $state(false);
@@ -44,22 +50,120 @@
   let currentSettings = $state<AppSettings>({
     show_context_chip: true,
     allow_duplicates: true,
-    allow_external_paths: true,
+    shared_dir: "shared",
   });
 
-  // ── Settings panel state ────────────────────────────────────────────────
-  // In the settings window the panel is always visible; in the launcher it is
-  // toggled by the "settings" built-in command (which now opens a new window).
-  let showSettings = $state(isSettingsWindow);
+  // In the preferences window the settings panel is always visible when the
+  // settings tab is active; in the launcher it can be toggled (legacy path).
+  let showSettings = $state(false);
   let settingsShowContextChip = $state(true);
   let settingsAllowDuplicates = $state(true);
-  let settingsAllowExternalPaths = $state(true);
+  let settingsSharedDir = $state("shared");
   let settingsCommandsDir = $state("");
   let settingsChangingHotkey = $state(false);
   let settingsCapturedShortcut = $state("");
   let settingsHotkeyError = $state("");
   let settingsSavedTimer: ReturnType<typeof setTimeout> | null = null;
   let settingsSaved = $state(false);
+
+  // ── Command editor state ────────────────────────────────────────────
+  let cmdList = $state<CommandFileMeta[]>([]);
+  let cmdFilter = $state("");
+  let cmdSelectedFile = $state<string | null>(null);
+  let cmdIsNew = $state(false);
+  let cmdPhrase = $state("");
+  let cmdTitle = $state("");
+  let cmdEnabled = $state(true);
+  let cmdActionType = $state<"open_url" | "paste_text" | "copy_text" | "static_list" | "dynamic_list" | "script_action">("open_url");
+  let cmdUrl = $state("");
+  let cmdText = $state("");
+  let cmdListName = $state("");
+  let cmdItemAction = $state("");
+  let cmdScript = $state("");
+  let cmdArgMode = $state("none");
+  let cmdResultAction = $state("paste_text");
+  let cmdPrefix = $state("");
+  let cmdSuffix = $state("");
+  let cmdSaving = $state(false);
+  let cmdSaveError = $state("");
+  let cmdDeleteConfirm = $state(false);
+  // ── Folder & script editor state ──────────────────────────────────────
+  let cmdFolders = $state<string[]>([]);
+  let cmdTargetDir = $state("");  // folder for new commands
+  let cmdNewFolderName = $state("");  // when creating a new folder
+  let cmdShowNewFolder = $state(false); // toggle inline new-folder input
+  let cmdCollapsedFolders = $state<Set<string>>(new Set());
+  // Tracks the previous filter text so we can auto-expand when the query changes
+  let cmdPrevFilter = $state("");
+  // Script editor
+  let cmdScriptContent = $state("");
+  let cmdScriptExists = $state(false);
+  let cmdScriptLoading = $state(false);
+  let cmdScriptDirty = $state(false);
+  let cmdScriptSaving = $state(false);
+  let cmdScriptError = $state("");
+  // When the filter query changes, auto-expand all folders so matches are visible.
+  // The user can still manually collapse folders during the same search.
+  $effect(() => {
+    if (cmdFilter !== cmdPrevFilter) {
+      cmdPrevFilter = cmdFilter;
+      if (cmdFilter) {
+        cmdCollapsedFolders = new Set(); // expand all
+      }
+    }
+  });
+  const cmdFilteredList = $derived(
+    cmdList.filter(c =>
+      cmdFilter === "" ||
+      c.phrase.toLowerCase().includes(cmdFilter.toLowerCase()) ||
+      c.title.toLowerCase().includes(cmdFilter.toLowerCase())
+    )
+  );
+  // Group filtered commands by source_dir for sidebar folder view
+  const cmdGroupedList = $derived(() => {
+    const groups: { folder: string; label: string; items: CommandFileMeta[] }[] = [];
+    const map = new Map<string, CommandFileMeta[]>();
+    for (const c of cmdFilteredList) {
+      const key = c.source_dir || "";
+      if (!map.has(key)) map.set(key, []);
+      map.get(key)!.push(c);
+    }
+    // Sort folders: root first, then alphabetically
+    const keys = [...map.keys()].sort((a, b) => {
+      if (a === "" && b !== "") return -1;
+      if (a !== "" && b === "") return 1;
+      return a.localeCompare(b);
+    });
+    for (const key of keys) {
+      groups.push({
+        folder: key,
+        label: key || "Commands",
+        items: map.get(key)!,
+      });
+    }
+    return groups;
+  });
+  // Whether the script name uses legacy ${VAR} substitution (no longer supported)
+  const cmdScriptIsExternal = $derived(cmdScript.includes("${"));
+  const cmdPhraseConflict = $derived(
+    !!cmdPhrase.trim() &&
+    cmdList.some(c =>
+      c.phrase.toLowerCase() === cmdPhrase.trim().toLowerCase() &&
+      c.file_path !== cmdSelectedFile
+    )
+  );
+  const cmdCanSave = $derived(
+    !cmdSaving &&
+    cmdPhrase.trim() !== "" &&
+    !cmdPhraseConflict &&
+    (cmdActionType === "open_url" ? cmdUrl.trim() !== ""
+      : cmdActionType === "paste_text" || cmdActionType === "copy_text" ? cmdText.trim() !== ""
+      : cmdActionType === "static_list" ? cmdListName.trim() !== ""
+      : cmdActionType === "dynamic_list" ? cmdScript.trim() !== ""
+      : cmdActionType === "script_action" ? cmdScript.trim() !== "" && cmdResultAction !== ""
+      : false)
+  );
+  const CMD_EDITABLE_TYPES = new Set(["open_url", "paste_text", "copy_text", "static_list", "dynamic_list", "script_action"]);
 
   // Debug mode — toggled via /debug command, resets on app restart
   let debugMode = $state(false);
@@ -121,6 +225,12 @@
       title: "Open Nimble settings",
       env: {}, source_dir: "",
       action: { type: "builtin", config: { action: "open_settings" } },
+    },
+    {
+      phrase: "/commands",
+      title: "Open command editor",
+      env: {}, source_dir: "",
+      action: { type: "builtin", config: { action: "open_commands" } },
     },
     {
       phrase: "/debug",
@@ -407,17 +517,279 @@
     invoke("dismiss_launcher").catch(() => appWindow.hide());
   }
 
-  // ── Settings helpers ───────────────────────────────────────────────────
-  // Opens the dedicated settings window (creates it if not already open).
-  // The launcher window hides itself immediately so it stays out of the way.
-  function openSettings() {
-    invoke("open_settings_window").catch(() => {});
+  // ── Preferences window helpers ─────────────────────────────────────────
+  // Open the unified Preferences window on a specific tab, then dismiss the launcher.
+  function openPreferences(tab: "commands" | "settings") {
+    invoke("open_preferences_window", { tab }).catch(() => {});
     dismiss();
   }
 
+  // ── Command editor helpers ─────────────────────────────────────────────
+  async function cmdRefreshList() {
+    cmdList = await invoke<CommandFileMeta[]>("list_command_files").catch(() => []);
+    cmdFolders = await invoke<string[]>("list_command_folders").catch(() => []);
+  }
+
+  function cmdSelectItem(meta: CommandFileMeta) {
+    cmdSelectedFile = meta.file_path;
+    cmdIsNew = false;
+    cmdPhrase = meta.phrase;
+    cmdTitle = meta.title;
+    cmdEnabled = meta.enabled;
+    cmdSaveError = "";
+    cmdDeleteConfirm = false;
+    cmdScriptContent = "";
+    cmdScriptExists = false;
+    cmdScriptDirty = false;
+    cmdScriptError = "";
+    if (meta.action_type === "open_url" || meta.action_type === "paste_text" || meta.action_type === "copy_text" || meta.action_type === "static_list" || meta.action_type === "dynamic_list" || meta.action_type === "script_action") {
+      cmdActionType = meta.action_type;
+    } else {
+      cmdActionType = "open_url";
+    }
+    cmdUrl = "";
+    cmdText = "";
+    cmdListName = "";
+    cmdItemAction = "";
+    cmdScript = "";
+    cmdArgMode = "none";
+    cmdResultAction = "paste_text";
+    cmdPrefix = "";
+    cmdSuffix = "";
+    // Load full config from backend to populate form fields
+    invoke<{ commands: import("$lib/types").Command[] }>("list_commands")
+      .then(result => {
+        const full = result.commands.find(c => c.phrase.toLowerCase() === meta.phrase.toLowerCase());
+        if (!full) return;
+        if (full.action.type === "open_url") cmdUrl = full.action.config.url;
+        else if (full.action.type === "paste_text") cmdText = full.action.config.text;
+        else if (full.action.type === "copy_text") cmdText = full.action.config.text;
+        else if (full.action.type === "static_list") {
+          cmdListName = full.action.config.list;
+          cmdItemAction = full.action.config.item_action ?? "";
+        } else if (full.action.type === "dynamic_list") {
+          cmdScript = full.action.config.script;
+          cmdArgMode = full.action.config.arg ?? "none";
+          cmdItemAction = full.action.config.item_action ?? "";
+          cmdLoadScript(meta.source_dir, full.action.config.script);
+        } else if (full.action.type === "script_action") {
+          cmdScript = full.action.config.script;
+          cmdArgMode = full.action.config.arg ?? "none";
+          cmdResultAction = full.action.config.result_action;
+          cmdPrefix = full.action.config.prefix ?? "";
+          cmdSuffix = full.action.config.suffix ?? "";
+          cmdLoadScript(meta.source_dir, full.action.config.script);
+        }
+      })
+      .catch(() => {});
+  }
+
+  /** Load a script's content for the inline editor (co-located or shared:). */
+  async function cmdLoadScript(commandDir: string, scriptName: string) {
+    // Skip loading for legacy ${VAR} scripts (no longer supported)
+    if (scriptName.includes("${")) {
+      cmdScriptContent = "";
+      cmdScriptExists = false;
+      cmdScriptDirty = false;
+      return;
+    }
+    cmdScriptLoading = true;
+    cmdScriptError = "";
+    try {
+      const content = await invoke<string>("read_script_file", {
+        commandDir,
+        scriptName,
+      });
+      cmdScriptContent = content;
+      cmdScriptExists = true;
+      cmdScriptDirty = false;
+    } catch (err) {
+      if (String(err) === "not_found") {
+        cmdScriptContent = "";
+        cmdScriptExists = false;
+      } else {
+        cmdScriptError = String(err);
+      }
+    } finally {
+      cmdScriptLoading = false;
+    }
+  }
+
+  /** Save the inline script editor content to disk. */
+  async function cmdSaveScript() {
+    if (!cmdScript.trim() || cmdScriptIsExternal) return;
+    // Determine the command_dir from the currently selected file or target_dir
+    const commandDir = cmdIsNew
+      ? (cmdTargetDir || "")
+      : (cmdList.find(c => c.file_path === cmdSelectedFile)?.source_dir ?? "");
+    cmdScriptSaving = true;
+    cmdScriptError = "";
+    try {
+      await invoke("write_script_file", {
+        commandDir,
+        scriptName: cmdScript.trim(),
+        content: cmdScriptContent,
+      });
+      cmdScriptExists = true;
+      cmdScriptDirty = false;
+    } catch (err) {
+      cmdScriptError = String(err);
+    } finally {
+      cmdScriptSaving = false;
+    }
+  }
+
+  /** Generate a starter script template for a new command. */
+  function cmdGetScriptTemplate(actionType: string): string {
+    if (actionType === "dynamic_list") {
+      return `#!/bin/bash
+# Dynamic list script — output JSON array of { title, subtext } objects
+# or plain text (one item per line)
+
+echo '[
+  { "title": "Item 1", "subtext": "Description" },
+  { "title": "Item 2", "subtext": "Another item" }
+]'
+`;
+    }
+    return `#!/bin/bash
+# Script action — output one value per line
+# Each value is passed to the result_action (paste_text, copy_text, or open_url)
+
+echo "Hello, world!"
+`;
+  }
+
+  /** Create a new script from a template. */
+  async function cmdCreateScript() {
+    if (!cmdScript.trim() || cmdScriptIsExternal) return;
+    cmdScriptContent = cmdGetScriptTemplate(cmdActionType);
+    cmdScriptDirty = true;
+  }
+
+  function cmdStartNew() {
+    cmdSelectedFile = null;
+    cmdIsNew = true;
+    cmdPhrase = "";
+    cmdTitle = "";
+    cmdEnabled = true;
+    cmdActionType = "open_url";
+    cmdUrl = "";
+    cmdText = "";
+    cmdListName = "";
+    cmdItemAction = "";
+    cmdScript = "";
+    cmdArgMode = "none";
+    cmdResultAction = "paste_text";
+    cmdPrefix = "";
+    cmdSuffix = "";
+    cmdSaveError = "";
+    cmdDeleteConfirm = false;
+    cmdTargetDir = "";
+    cmdNewFolderName = "";
+    cmdShowNewFolder = false;
+    cmdScriptContent = "";
+    cmdScriptExists = false;
+    cmdScriptDirty = false;
+    cmdScriptError = "";
+  }
+
+  function cmdCancelNew() {
+    cmdIsNew = false;
+    cmdSelectedFile = null;
+    cmdSaveError = "";
+  }
+
+  async function cmdSave() {
+    if (!cmdCanSave) return;
+    cmdSaving = true;
+    cmdSaveError = "";
+    let configJson: string;
+    if (cmdActionType === "open_url") {
+      configJson = JSON.stringify({ url: cmdUrl.trim() });
+    } else if (cmdActionType === "paste_text" || cmdActionType === "copy_text") {
+      configJson = JSON.stringify({ text: cmdText });
+    } else if (cmdActionType === "static_list") {
+      configJson = JSON.stringify({
+        list: cmdListName.trim(),
+        ...(cmdItemAction ? { item_action: cmdItemAction } : {}),
+      });
+    } else if (cmdActionType === "dynamic_list") {
+      configJson = JSON.stringify({
+        script: cmdScript.trim(),
+        arg: cmdArgMode,
+        ...(cmdItemAction ? { item_action: cmdItemAction } : {}),
+      });
+    } else {
+      // script_action
+      configJson = JSON.stringify({
+        script: cmdScript.trim(),
+        arg: cmdArgMode,
+        result_action: cmdResultAction,
+        ...(cmdPrefix ? { prefix: cmdPrefix } : {}),
+        ...(cmdSuffix ? { suffix: cmdSuffix } : {}),
+      });
+    }
+    try {
+      // Determine target directory for new commands
+      const effectiveTargetDir = cmdIsNew
+        ? (cmdShowNewFolder && cmdNewFolderName.trim() ? cmdNewFolderName.trim() : cmdTargetDir)
+        : undefined;
+      const newPath = await invoke<string>("save_command_file", {
+        phrase: cmdPhrase.trim(),
+        title: cmdTitle.trim() || cmdPhrase.trim(),
+        enabled: cmdEnabled,
+        actionType: cmdActionType,
+        configJson,
+        filePath: cmdSelectedFile ?? undefined,
+        targetDir: effectiveTargetDir,
+      });
+      // Save script content if dirty (for dynamic_list / script_action)
+      if (cmdScriptDirty && cmdScript.trim() && !cmdScriptIsExternal) {
+        const saveDir = effectiveTargetDir ?? (cmdList.find(c => c.file_path === newPath)?.source_dir ?? "");
+        try {
+          await invoke("write_script_file", {
+            commandDir: saveDir,
+            scriptName: cmdScript.trim(),
+            content: cmdScriptContent,
+          });
+          cmdScriptDirty = false;
+          cmdScriptExists = true;
+        } catch (err) {
+          cmdScriptError = String(err);
+        }
+      }
+      cmdSelectedFile = newPath;
+      cmdIsNew = false;
+      await cmdRefreshList();
+      // Re-select so the sidebar highlights the saved item
+      const meta = cmdList.find(c => c.file_path === newPath);
+      if (meta) cmdSelectItem(meta);
+    } catch (err) {
+      cmdSaveError = String(err);
+    } finally {
+      cmdSaving = false;
+    }
+  }
+
+  async function cmdDelete() {
+    if (!cmdSelectedFile) return;
+    if (!cmdDeleteConfirm) { cmdDeleteConfirm = true; return; }
+    try {
+      await invoke("delete_command_file", { filePath: cmdSelectedFile });
+      cmdSelectedFile = null;
+      cmdIsNew = false;
+      cmdDeleteConfirm = false;
+      await cmdRefreshList();
+    } catch (err) {
+      cmdSaveError = String(err);
+      cmdDeleteConfirm = false;
+    }
+  }
+
   async function closeSettings() {
-    // In the settings window: save and close the whole window.
-    if (isSettingsWindow) {
+    // In the preferences window: save and close the whole window.
+    if (isPreferencesWindow) {
       await persistSettings();
       appWindow.close();
       return;
@@ -431,7 +803,7 @@
   async function restoreDefaults() {
     settingsShowContextChip = true;
     settingsAllowDuplicates = true;
-    settingsAllowExternalPaths = true;
+    settingsSharedDir = "shared";
     settingsCommandsDir = "";
     await persistSettings();
   }
@@ -442,13 +814,23 @@
     settingsSavedTimer = setTimeout(() => { settingsSaved = false; }, 1500);
   }
 
+  async function browseCommandsDir() {
+    const selected = await invoke<string | null>("browse_directory", {
+      defaultPath: settingsCommandsDir.trim() || null,
+    });
+    if (selected) {
+      settingsCommandsDir = selected;
+      await persistSettings();
+    }
+  }
+
   async function persistSettings() {
     const dir = settingsCommandsDir.trim() || undefined;
     try {
       await invoke("save_settings", {
         showContextChip: settingsShowContextChip,
         allowDuplicates: settingsAllowDuplicates,
-        allowExternalPaths: settingsAllowExternalPaths,
+        sharedDir: settingsSharedDir,
         commandsDir: dir ?? null,
       });
       // Keep currentSettings in sync
@@ -456,7 +838,7 @@
         ...currentSettings,
         show_context_chip: settingsShowContextChip,
         allow_duplicates: settingsAllowDuplicates,
-        allow_external_paths: settingsAllowExternalPaths,
+        shared_dir: settingsSharedDir,
         commands_dir: dir,
       };
       // Apply show_context_chip immediately
@@ -691,7 +1073,9 @@
           setTimeout(() => { if (inputEl) inputEl.placeholder = ""; }, 3000);
         }
       } else if (builtinAction === "open_settings") {
-        openSettings();
+        openPreferences("settings");
+      } else if (builtinAction === "open_commands") {
+        openPreferences("commands");
       } else if (builtinAction === "toggle_debug") {
         try {
           const nowOn = await invoke<boolean>("toggle_debug");
@@ -736,6 +1120,15 @@
   function handleKeydown(e: KeyboardEvent) {
     if (onboarding) return; // handled by the onboarding div
     if (showSettings) { handleSettingsKeydown(e); return; }
+    if (isPreferencesWindow) {
+      const mod = e.metaKey || e.ctrlKey;
+      if (activePreferencesTab === "commands") {
+        if (mod && e.key === "n") { e.preventDefault(); cmdStartNew(); return; }
+        if (mod && e.key === "s") { e.preventDefault(); cmdSave(); return; }
+      }
+      if (e.key === "Escape") { e.preventDefault(); appWindow.close(); return; }
+      return;
+    }
     if (e.key === "Escape") {
       e.preventDefault();
       dismissWithFocusRestore();
@@ -770,23 +1163,33 @@
     let unlistenReload: (() => void) | null = null;
     let unlistenDeepLink: (() => void) | null = null;
     let unlistenSettingsChanged: (() => void) | null = null;
+    let unlistenSwitchTab: (() => void) | null = null;
 
     (async () => {
       // Load settings from the backend (settings.yaml)
       const appSettings = await invoke<AppSettings>("get_settings").catch(
-        () => ({ hotkey: undefined, show_context_chip: true, allow_duplicates: true, allow_external_paths: true, seed_examples: false } as AppSettings)
+        () => ({ hotkey: undefined, show_context_chip: true, allow_duplicates: true, shared_dir: "shared", seed_examples: false } as AppSettings)
       );
       showContextChip = appSettings.show_context_chip;
       currentSettings = appSettings;
 
-      // ── Settings window path ─────────────────────────────────────────
-      // When running as the settings window we only need to populate the
-      // settings panel state and then stop — no launcher init required.
-      if (isSettingsWindow) {
+      // ── Preferences window path ──────────────────────────────────────
+      // When running as the preferences window we initialise both tabs and
+      // listen for tab-switch events from the launcher, then stop.
+      if (isPreferencesWindow) {
         settingsShowContextChip = appSettings.show_context_chip;
         settingsAllowDuplicates = appSettings.allow_duplicates;
-        settingsAllowExternalPaths = appSettings.allow_external_paths;
+        settingsSharedDir = appSettings.shared_dir ?? "shared";
         settingsCommandsDir = appSettings.commands_dir ?? "";
+        await cmdRefreshList();
+        // Read the initial tab from managed state (avoids URL hash / PathBuf issues).
+        const initialTab = await invoke<string>("get_preferences_initial_tab").catch(() => "commands");
+        activePreferencesTab = initialTab;
+        showSettings = initialTab === "settings";
+        unlistenSwitchTab = await listen<string>("preferences://switch-tab", (e) => {
+          activePreferencesTab = e.payload;
+          showSettings = e.payload === "settings";
+        });
         return;
       }
 
@@ -887,6 +1290,7 @@
       unlistenReload?.();
       unlistenDeepLink?.();
       unlistenSettingsChanged?.();
+      unlistenSwitchTab?.();
     };
   });
 </script>
@@ -919,20 +1323,437 @@
       Confirm shortcut
     </button>
   </div>
-{:else if showSettings}
-  <!-- ── Settings panel ────────────────────────────────────────────────── -->
-  <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <div class="settings-panel">
-    <div class="settings-header">
-      <span class="settings-title">Settings</span>
-      <div class="settings-header-right">
-        <button class="settings-restore" onclick={restoreDefaults}>Restore Defaults</button>
-        {#if settingsSaved}
-          <span class="settings-saved-badge">Saved</span>
+{:else if isPreferencesWindow}
+  <!-- ── Unified Preferences window ───────────────────────────────────── -->
+  <div class="prefs-window">
+    <!-- Tab bar -->
+    <div class="prefs-tabs" role="tablist">
+      <button
+        class="prefs-tab"
+        class:active={activePreferencesTab === "commands"}
+        role="tab"
+        aria-selected={activePreferencesTab === "commands"}
+        onclick={() => { activePreferencesTab = "commands"; showSettings = false; }}
+      >Commands</button>
+      <button
+        class="prefs-tab"
+        class:active={activePreferencesTab === "settings"}
+        role="tab"
+        aria-selected={activePreferencesTab === "settings"}
+        onclick={() => { activePreferencesTab = "settings"; showSettings = true; }}
+      >Settings</button>
+    </div>
+
+    <!-- Commands tab -->
+    {#if activePreferencesTab === "commands"}
+    <div class="cmd-editor">
+      <!-- sidebar -->
+      <div class="cmd-sidebar">
+        <div class="cmd-sidebar-header">
+          <input
+            class="cmd-filter"
+            type="text"
+            placeholder="Filter…"
+            bind:value={cmdFilter}
+            autocomplete="off"
+            autocorrect="off"
+            spellcheck="false"
+          />
+          <!-- svelte-ignore a11y_consider_explicit_label -->
+          <button class="cmd-new-btn" title="New command (⌘N)" onclick={cmdStartNew}>＋</button>
+        </div>
+        <div class="cmd-list" role="list">
+          {#if cmdFilteredList.length === 0}
+            <div class="cmd-list-empty">No commands yet.<br>Click ＋ to create one.</div>
+          {:else}
+            {#each cmdGroupedList() as group}
+              <button
+                class="cmd-folder-header"
+                onclick={() => {
+                  const next = new Set(cmdCollapsedFolders);
+                  next.has(group.folder) ? next.delete(group.folder) : next.add(group.folder);
+                  cmdCollapsedFolders = next;
+                }}
+              >
+                <span class="cmd-folder-toggle">{cmdCollapsedFolders.has(group.folder) ? '+' : '−'}</span>
+                <span class="cmd-folder-name">{group.label}</span>
+                <span class="cmd-folder-count">{group.items.length}</span>
+              </button>
+              {#if !cmdCollapsedFolders.has(group.folder)}
+                {#each group.items as meta}
+                  <!-- svelte-ignore a11y_click_events_have_key_events -->
+                  <div
+                    class="cmd-list-item"
+                    class:selected={meta.file_path === cmdSelectedFile}
+                    onclick={() => cmdSelectItem(meta)}
+                    role="option"
+                    tabindex="0"
+                    aria-selected={meta.file_path === cmdSelectedFile}
+                  >
+                    <span class="cmd-item-phrase">{meta.phrase}</span>
+                    <span class="cmd-item-badge cmd-badge-{meta.action_type.replace('_', '-')}">{meta.action_type.replace('_', ' ')}</span>
+                  </div>
+                {/each}
+              {/if}
+            {/each}
+          {/if}
+        </div>
+      </div>
+
+      <!-- detail panel -->
+      <div class="cmd-detail">
+        {#if !cmdSelectedFile && !cmdIsNew}
+          <div class="cmd-empty-state">
+            <p>No command selected.</p>
+            <p>Pick one from the list, or click <strong>＋</strong> to create a new command.</p>
+          </div>
+        {:else}
+          <div class="cmd-form">
+            <!-- Phrase -->
+            <div class="cmd-field">
+              <label class="cmd-label" for="cmd-phrase">Phrase</label>
+              <input
+                id="cmd-phrase"
+                class="cmd-input"
+                class:error={cmdPhraseConflict}
+                type="text"
+                bind:value={cmdPhrase}
+                placeholder="e.g. open jira"
+                autocomplete="off"
+                spellcheck="false"
+              />
+              {#if cmdPhraseConflict}
+                <span class="cmd-field-error">"{cmdPhrase.trim()}" is already used by another command.</span>
+              {/if}
+            </div>
+
+            <!-- Folder (new commands only) -->
+            {#if cmdIsNew}
+              <div class="cmd-field">
+                <label class="cmd-label" for="cmd-folder">Folder</label>
+                {#if cmdShowNewFolder}
+                  <div class="cmd-folder-input-row">
+                    <input
+                      id="cmd-folder-new"
+                      class="cmd-input cmd-folder-new-input"
+                      type="text"
+                      bind:value={cmdNewFolderName}
+                      placeholder="e.g. work/jira"
+                      autocomplete="off"
+                      spellcheck="false"
+                    />
+                    <button class="cmd-btn-tiny" onclick={() => { cmdShowNewFolder = false; cmdNewFolderName = ""; }}>Cancel</button>
+                  </div>
+                {:else}
+                  <div class="cmd-folder-input-row">
+                    <select id="cmd-folder" class="cmd-select cmd-folder-select" bind:value={cmdTargetDir}>
+                      <option value="">Root (commands/)</option>
+                      {#each cmdFolders as f}
+                        <option value={f}>{f}/</option>
+                      {/each}
+                    </select>
+                    <button class="cmd-btn-tiny" onclick={() => { cmdShowNewFolder = true; }}>New…</button>
+                  </div>
+                {/if}
+                <span class="cmd-field-hint">Where to save the command YAML file.</span>
+              </div>
+            {:else if cmdSelectedFile}
+              <div class="cmd-field">
+                <span class="cmd-label">Location</span>
+                <span class="cmd-field-hint cmd-location-path">{cmdList.find(c => c.file_path === cmdSelectedFile)?.source_dir || "commands/"}</span>
+              </div>
+            {/if}
+
+            <!-- Title -->
+            <div class="cmd-field">
+              <label class="cmd-label" for="cmd-title">Title</label>
+              <input
+                id="cmd-title"
+                class="cmd-input"
+                type="text"
+                bind:value={cmdTitle}
+                placeholder="e.g. Open Jira"
+                autocomplete="off"
+                spellcheck="false"
+              />
+            </div>
+
+            <!-- Action type -->
+            <div class="cmd-field">
+              <label class="cmd-label" for="cmd-action-type">Action</label>
+              <select
+                id="cmd-action-type"
+                class="cmd-select"
+                bind:value={cmdActionType}
+                onchange={() => { cmdUrl = ""; cmdText = ""; cmdListName = ""; cmdItemAction = ""; cmdScript = ""; cmdArgMode = "none"; cmdResultAction = "paste_text"; cmdPrefix = ""; cmdSuffix = ""; }}
+              >
+                <option value="open_url">Open URL</option>
+                <option value="paste_text">Paste Text</option>
+                <option value="copy_text">Copy Text</option>
+                <option value="static_list">Static List</option>
+                <option value="dynamic_list">Dynamic List</option>
+                <option value="script_action">Script Action</option>
+              </select>
+            </div>
+
+            <!-- Action-specific config -->
+            {#if cmdActionType === "open_url"}
+              <div class="cmd-field">
+                <label class="cmd-label" for="cmd-url">URL</label>
+                <input
+                  id="cmd-url"
+                  class="cmd-input"
+                  type="text"
+                  bind:value={cmdUrl}
+                  placeholder="https://example.com"
+                  autocomplete="off"
+                  spellcheck="false"
+                />
+                {#if cmdUrl.includes("{param}")}
+                  <span class="cmd-field-hint cmd-field-hint-ok">Contains &#123;param&#125; — user input is appended after the phrase.<br>Preview: {cmdUrl.replace("{param}", "<query>")}</span>
+                {:else}
+                  <span class="cmd-field-hint">Use &#123;param&#125; in the URL to accept user input after the phrase.</span>
+                {/if}
+              </div>
+            {:else if cmdActionType === "paste_text" || cmdActionType === "copy_text"}
+              <div class="cmd-field">
+                <label class="cmd-label" for="cmd-text">Text</label>
+                <textarea
+                  id="cmd-text"
+                  class="cmd-textarea"
+                  bind:value={cmdText}
+                  placeholder={cmdActionType === "paste_text" ? "Text to paste…" : "Text to copy…"}
+                  rows="6"
+                  spellcheck="false"
+                ></textarea>
+                <span class="cmd-field-hint">
+                  {#if cmdActionType === "paste_text"}
+                    Pasted into the app that had focus before the launcher.
+                  {:else}
+                    Copied to the clipboard without simulating a keypress.
+                  {/if}
+                  {cmdText.length > 0 ? `(${cmdText.length} chars)` : ""}
+                </span>
+              </div>
+            {:else if cmdActionType === "static_list"}
+              <div class="cmd-field">
+                <label class="cmd-label" for="cmd-list-name">List file name</label>
+                <input
+                  id="cmd-list-name"
+                  class="cmd-input"
+                  type="text"
+                  bind:value={cmdListName}
+                  placeholder="e.g. team-emails"
+                  autocomplete="off"
+                  spellcheck="false"
+                />
+                <span class="cmd-field-hint">Name of a .tsv file co-located with the command YAML (without extension).</span>
+              </div>
+              <div class="cmd-field">
+                <label class="cmd-label" for="cmd-item-action">Item action</label>
+                <select id="cmd-item-action" class="cmd-select" bind:value={cmdItemAction}>
+                  <option value="">None (dismiss only)</option>
+                  <option value="paste_text">Paste Text</option>
+                  <option value="copy_text">Copy Text</option>
+                  <option value="open_url">Open URL</option>
+                </select>
+                <span class="cmd-field-hint">Action applied to the selected list item's value.</span>
+              </div>
+            {:else if cmdActionType === "dynamic_list"}
+              <div class="cmd-field">
+                <label class="cmd-label" for="cmd-script">Script</label>
+                <input
+                  id="cmd-script"
+                  class="cmd-input"
+                  type="text"
+                  bind:value={cmdScript}
+                  placeholder="e.g. hello.sh"
+                  autocomplete="off"
+                  spellcheck="false"
+                />
+                <span class="cmd-field-hint">Script in the command directory or scripts/ folder.</span>
+              </div>
+              <div class="cmd-field">
+                <label class="cmd-label" for="cmd-arg-mode">Argument mode</label>
+                <select id="cmd-arg-mode" class="cmd-select" bind:value={cmdArgMode}>
+                  <option value="none">None</option>
+                  <option value="optional">Optional</option>
+                  <option value="required">Required</option>
+                </select>
+              </div>
+              <div class="cmd-field">
+                <label class="cmd-label" for="cmd-dl-item-action">Item action</label>
+                <select id="cmd-dl-item-action" class="cmd-select" bind:value={cmdItemAction}>
+                  <option value="">None (dismiss only)</option>
+                  <option value="paste_text">Paste Text</option>
+                  <option value="copy_text">Copy Text</option>
+                  <option value="open_url">Open URL</option>
+                </select>
+              </div>
+            {:else if cmdActionType === "script_action"}
+              <div class="cmd-field">
+                <label class="cmd-label" for="cmd-sa-script">Script</label>
+                <input
+                  id="cmd-sa-script"
+                  class="cmd-input"
+                  type="text"
+                  bind:value={cmdScript}
+                  placeholder="e.g. emails.sh"
+                  autocomplete="off"
+                  spellcheck="false"
+                />
+                <span class="cmd-field-hint">Script in the command directory or scripts/ folder.</span>
+              </div>
+              <div class="cmd-field">
+                <label class="cmd-label" for="cmd-sa-arg-mode">Argument mode</label>
+                <select id="cmd-sa-arg-mode" class="cmd-select" bind:value={cmdArgMode}>
+                  <option value="none">None</option>
+                  <option value="optional">Optional</option>
+                  <option value="required">Required</option>
+                </select>
+              </div>
+              <div class="cmd-field">
+                <label class="cmd-label" for="cmd-result-action">Result action</label>
+                <select id="cmd-result-action" class="cmd-select" bind:value={cmdResultAction}>
+                  <option value="paste_text">Paste Text</option>
+                  <option value="copy_text">Copy Text</option>
+                  <option value="open_url">Open URL</option>
+                </select>
+                <span class="cmd-field-hint">Built-in action applied to each value the script returns.</span>
+              </div>
+              <div class="cmd-field">
+                <label class="cmd-label" for="cmd-prefix">Prefix (optional)</label>
+                <input
+                  id="cmd-prefix"
+                  class="cmd-input"
+                  type="text"
+                  bind:value={cmdPrefix}
+                  placeholder=""
+                  autocomplete="off"
+                  spellcheck="false"
+                />
+              </div>
+              <div class="cmd-field">
+                <label class="cmd-label" for="cmd-suffix">Suffix (optional)</label>
+                <input
+                  id="cmd-suffix"
+                  class="cmd-input"
+                  type="text"
+                  bind:value={cmdSuffix}
+                  placeholder=""
+                  autocomplete="off"
+                  spellcheck="false"
+                />
+              </div>
+            {/if}
+
+            <!-- Inline script editor (for dynamic_list and script_action) -->
+            {#if (cmdActionType === "dynamic_list" || cmdActionType === "script_action") && cmdScript.trim()}
+              <div class="cmd-field">
+                <div class="cmd-script-header">
+                  <label class="cmd-label" for="cmd-script-editor">Script content</label>
+                  {#if cmdScriptDirty}
+                    <span class="cmd-script-dirty-badge">unsaved</span>
+                  {/if}
+                </div>
+                {#if cmdScriptIsExternal}
+                  <div class="cmd-script-external-hint">
+                    <span>The <code>${"${}"}</code> syntax is no longer supported. Use a plain filename for co-located scripts or the <code>shared:</code> prefix (e.g. <code>shared:script.sh</code>).</span>
+                  </div>
+                {:else if cmdScriptLoading}
+                  <div class="cmd-script-status">Loading…</div>
+                {:else if !cmdScriptExists && !cmdScriptDirty}
+                  <div class="cmd-script-not-found">
+                    <span>Script file not found.</span>
+                    <button class="cmd-btn-tiny cmd-btn-create-script" onclick={cmdCreateScript}>Create from template</button>
+                  </div>
+                {:else}
+                  <textarea
+                    id="cmd-script-editor"
+                    class="cmd-textarea cmd-script-textarea"
+                    bind:value={cmdScriptContent}
+                    oninput={() => { cmdScriptDirty = true; }}
+                    rows="10"
+                    spellcheck="false"
+                    placeholder="#!/bin/bash"
+                  ></textarea>
+                  <div class="cmd-script-actions">
+                    {#if cmdScriptError}
+                      <span class="cmd-field-error">{cmdScriptError}</span>
+                    {/if}
+                    <button
+                      class="cmd-btn-tiny"
+                      disabled={!cmdScriptDirty || cmdScriptSaving}
+                      onclick={cmdSaveScript}
+                    >{cmdScriptSaving ? "Saving…" : "Save script"}</button>
+                  </div>
+                {/if}
+              </div>
+            {/if}
+
+            <!-- Enabled toggle -->
+            <div class="cmd-field cmd-field-inline">
+              <label class="cmd-checkbox-label">
+                <input type="checkbox" bind:checked={cmdEnabled} />
+                <span>Enabled</span>
+              </label>
+            </div>
+
+            <!-- Error -->
+            {#if cmdSaveError}
+              <p class="cmd-save-error">{cmdSaveError}</p>
+            {/if}
+
+            <!-- Actions row -->
+            <div class="cmd-actions">
+              {#if cmdIsNew}
+                <button class="cmd-btn-ghost" onclick={cmdCancelNew}>Cancel</button>
+                <button class="cmd-btn-primary" disabled={!cmdCanSave} onclick={cmdSave}>
+                  {cmdSaving ? "Creating…" : "Create"}
+                </button>
+              {:else}
+                {#if cmdDeleteConfirm}
+                  <span class="cmd-delete-confirm-text">Delete this command?</span>
+                  <button class="cmd-btn-ghost" onclick={() => cmdDeleteConfirm = false}>Cancel</button>
+                  <button class="cmd-btn-danger" onclick={cmdDelete}>Delete</button>
+                {:else}
+                  <div class="cmd-actions-left">
+                    <button class="cmd-btn-ghost cmd-btn-ghost-danger" onclick={cmdDelete}>Delete</button>
+                    {#if cmdSelectedFile}
+                      <button class="cmd-btn-icon" title="Reveal in file manager" onclick={() => invoke("reveal_in_file_manager", { path: cmdSelectedFile })}>
+                        <svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M2 3h12v10H2V3zm1 1v8h10V4H3z" fill="currentColor"/><path d="M5 7h6v1H5V7z" fill="currentColor"/></svg>
+                      </button>
+                      <button class="cmd-btn-icon" title="Open in default editor" onclick={() => invoke("open_in_default_editor", { path: cmdSelectedFile })}>
+                        <svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M11.5 1.5l3 3-9 9H2.5v-3l9-9zm-1 4l-7 7v1h1l7-7-1-1z" fill="currentColor"/></svg>
+                      </button>
+                    {/if}
+                  </div>
+                  <button class="cmd-btn-primary" disabled={!cmdCanSave} onclick={cmdSave}>
+                    {cmdSaving ? "Saving…" : "Save"}
+                  </button>
+                {/if}
+              {/if}
+            </div>
+          </div>
         {/if}
-        <button class="settings-done" onclick={closeSettings}>Save</button>
       </div>
     </div>
+    {/if}
+
+    <!-- Settings tab -->
+    {#if activePreferencesTab === "settings"}
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div class="settings-panel">
+      <div class="settings-header">
+        <span class="settings-title">Settings</span>
+        <div class="settings-header-right">
+          <button class="settings-restore" onclick={restoreDefaults}>Restore Defaults</button>
+          {#if settingsSaved}
+            <span class="settings-saved-badge">Saved</span>
+          {/if}
+          <button class="settings-done" onclick={closeSettings}>Save</button>
+        </div>
+      </div>
 
     <div class="settings-body">
       <!-- Global shortcut -->
@@ -1002,25 +1823,22 @@
         </div>
       </div>
 
-      <!-- Allow external paths -->
-      <div class="settings-row">
+      <!-- Shared scripts directory -->
+      <div class="settings-row settings-row-stacked">
         <div class="settings-row-info">
-          <span class="row-title">Allow external paths</span>
-          <span class="row-desc">Scripts can resolve to paths outside the command directory</span>
+          <span class="row-title">Shared directory</span>
+          <span class="row-desc">Subdirectory inside commands root for shared scripts and lists (default: shared)</span>
         </div>
-        <!-- svelte-ignore a11y_click_events_have_key_events -->
-        <!-- svelte-ignore a11y_no_static_element_interactions -->
-        <div
-          class="toggle"
-          class:on={settingsAllowExternalPaths}
-          role="switch"
-          aria-checked={settingsAllowExternalPaths}
-          tabindex="0"
-          onclick={() => { settingsAllowExternalPaths = !settingsAllowExternalPaths; persistSettings(); }}
-          onkeydown={(e) => { if (e.key === " " || e.key === "Enter") { settingsAllowExternalPaths = !settingsAllowExternalPaths; persistSettings(); } }}
-        >
-          <span class="thumb"></span>
-        </div>
+        <input
+          class="settings-text-input"
+          type="text"
+          bind:value={settingsSharedDir}
+          placeholder="shared"
+          onblur={persistSettings}
+          spellcheck="false"
+          autocomplete="off"
+          autocorrect="off"
+        />
       </div>
 
       <!-- Commands directory -->
@@ -1029,18 +1847,23 @@
           <span class="row-title">Commands directory</span>
           <span class="row-desc">Custom absolute path (leave blank for default). Restart required.</span>
         </div>
-        <input
-          class="settings-text-input"
-          type="text"
-          bind:value={settingsCommandsDir}
-          placeholder="Default"
-          onblur={persistSettings}
-          spellcheck="false"
-          autocomplete="off"
-          autocorrect="off"
-        />
+        <div class="settings-dir-row">
+          <input
+            class="settings-text-input settings-dir-input"
+            type="text"
+            bind:value={settingsCommandsDir}
+            placeholder="Default"
+            onblur={persistSettings}
+            spellcheck="false"
+            autocomplete="off"
+            autocorrect="off"
+          />
+          <button class="settings-browse-btn" onclick={browseCommandsDir}>Browse…</button>
+        </div>
       </div>
     </div>
+  </div>
+    {/if}
   </div>
 {:else}
   <!-- ── Launcher bar ───────────────────────────────────────────────────── -->
@@ -1169,20 +1992,69 @@
     -webkit-user-select: none;
   }
 
-  /* When running as the standalone settings window, give the document a solid
+  /* When running as the unified Preferences window give the document a solid
      background so the transparent webview doesn't show through decorated chrome. */
-  :global(html.settings-window-mode),
-  :global(html.settings-window-mode body) {
+  :global(html.preferences-window-mode),
+  :global(html.preferences-window-mode body) {
     background: #1c1c1e;
-    overflow: auto;
+    overflow: hidden;
     height: 100%;
   }
 
-  :global(html.settings-window-mode) .settings-panel {
+  /* ── Preferences window shell ────────────────────────────────────────── */
+  .prefs-window {
+    display: flex;
+    flex-direction: column;
+    height: 100vh;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    color: #f5f5f7;
+    background: #1c1c1e;
+  }
+
+  .prefs-tabs {
+    display: flex;
+    flex-shrink: 0;
+    border-bottom: 1px solid rgba(255,255,255,0.08);
+    background: #1c1c1e;
+    padding: 10px 12px 0;
+    gap: 4px;
+  }
+
+  .prefs-tab {
+    padding: 6px 18px;
+    font-size: 13px;
+    font-weight: 500;
+    color: #fff;
+    opacity: 0.65;
+    cursor: pointer;
+    border-radius: 6px 6px 0 0;
+    border: none;
+    background: none;
+    font-family: inherit;
+    transition: opacity 0.15s;
+    user-select: none;
+    -webkit-user-select: none;
+  }
+  .prefs-tab:hover { opacity: 0.85; }
+  .prefs-tab.active {
+    opacity: 1;
+    background: #0a84ff;
+  }
+
+  /* The settings panel inside the preferences window fills the remaining height */
+  :global(html.preferences-window-mode) .settings-panel {
     border-radius: 0;
     box-shadow: none;
-    height: 100vh;
-    min-height: 100vh;
+    flex: 1;
+    height: auto;
+    min-height: 0;
+    overflow-y: auto;
+  }
+
+  /* The cmd-editor inside preferences fills the remaining space */
+  :global(html.preferences-window-mode) .cmd-editor {
+    flex: 1;
+    min-height: 0;
   }
 
   /* ── Launcher bar ────────────────────────────────────────────────────── */
@@ -1729,5 +2601,526 @@
   .settings-text-input::placeholder {
     color: rgba(245,245,247,.25);
   }
+
+  /* Commands directory row with browse button */
+  .settings-dir-row {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+  }
+
+  .settings-dir-input {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .settings-browse-btn {
+    flex-shrink: 0;
+    background: rgba(255,255,255,.08);
+    border: 1px solid rgba(255,255,255,.12);
+    border-radius: 7px;
+    color: #f5f5f7;
+    font-size: 12px;
+    padding: 7px 14px;
+    cursor: pointer;
+    transition: background .15s, border-color .15s;
+    white-space: nowrap;
+  }
+
+  .settings-browse-btn:hover {
+    background: rgba(255,255,255,.14);
+    border-color: rgba(255,255,255,.2);
+  }
+
+  .settings-browse-btn:active {
+    background: rgba(255,255,255,.06);
+  }
+
+  /* ── Command editor ──────────────────────────────────────────────────── */
+  .cmd-editor {
+    display: flex;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    color: #f5f5f7;
+    background: #1c1c1e;
+    height: 100%;
+  }
+
+  /* Sidebar */
+  .cmd-sidebar {
+    width: 210px;
+    min-width: 160px;
+    max-width: 280px;
+    display: flex;
+    flex-direction: column;
+    border-right: 1px solid rgba(255,255,255,.07);
+    background: rgba(255,255,255,.025);
+    flex-shrink: 0;
+  }
+
+  .cmd-sidebar-header {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 10px 10px 8px;
+    border-bottom: 1px solid rgba(255,255,255,.06);
+    flex-shrink: 0;
+  }
+
+  .cmd-filter {
+    flex: 1;
+    background: rgba(255,255,255,.06);
+    border: 1px solid rgba(255,255,255,.1);
+    border-radius: 6px;
+    color: #f5f5f7;
+    font-size: 12px;
+    font-family: inherit;
+    padding: 5px 8px;
+    outline: none;
+    transition: border-color .15s;
+  }
+  .cmd-filter:focus { border-color: rgba(10,132,255,.5); }
+  .cmd-filter::placeholder { color: rgba(245,245,247,.3); }
+
+  .cmd-new-btn {
+    background: #0a84ff;
+    border: none;
+    border-radius: 6px;
+    color: #fff;
+    font-size: 18px;
+    line-height: 1;
+    width: 28px;
+    height: 28px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    flex-shrink: 0;
+    transition: opacity .15s;
+  }
+  .cmd-new-btn:hover { opacity: .85; }
+
+  .cmd-list {
+    flex: 1;
+    overflow-y: auto;
+    padding: 4px;
+    scrollbar-width: thin;
+    scrollbar-color: rgba(255,255,255,.2) transparent;
+  }
+
+  .cmd-list-empty {
+    padding: 20px 12px;
+    color: rgba(245,245,247,.35);
+    font-size: 12px;
+    text-align: center;
+    line-height: 1.6;
+  }
+
+  .cmd-list-item {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    padding: 7px 8px 7px 22px;
+    border-radius: 7px;
+    cursor: default;
+    transition: background .1s;
+    border-left: 2px solid transparent;
+  }
+  .cmd-list-item:hover { background: rgba(255,255,255,.06); }
+  .cmd-list-item.selected {
+    background: rgba(255,255,255,.09);
+    border-left-color: #0a84ff;
+  }
+
+  .cmd-item-phrase {
+    font-size: 12px;
+    font-weight: 500;
+    color: #f5f5f7;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .cmd-item-badge {
+    font-size: 9px;
+    font-weight: 500;
+    letter-spacing: 0.4px;
+    text-transform: uppercase;
+    color: rgba(245,245,247,.4);
+  }
+  .cmd-badge-open-url      { color: #0a84ff; }
+  .cmd-badge-paste-text    { color: #30d158; }
+  .cmd-badge-copy-text     { color: #ff9f0a; }
+  .cmd-badge-static-list   { color: #bf5af2; }
+  .cmd-badge-dynamic-list  { color: #64d2ff; }
+  .cmd-badge-script-action { color: #ff6482; }
+
+  /* Detail panel */
+  .cmd-detail {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    overflow-y: auto;
+  }
+
+  .cmd-empty-state {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    color: rgba(245,245,247,.3);
+    font-size: 13px;
+    text-align: center;
+    padding: 40px;
+  }
+  .cmd-empty-state p { margin: 0; }
+
+  .cmd-form {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    padding: 20px 24px 24px;
+    flex: 1;
+  }
+
+  .cmd-field {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+  }
+  .cmd-field-inline {
+    flex-direction: row;
+    align-items: center;
+  }
+
+  .cmd-label {
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.4px;
+    text-transform: uppercase;
+    color: rgba(245,245,247,.45);
+  }
+
+  .cmd-input {
+    background: rgba(255,255,255,.06);
+    border: 1px solid rgba(255,255,255,.1);
+    border-radius: 7px;
+    color: #f5f5f7;
+    font-size: 13px;
+    font-family: inherit;
+    padding: 8px 10px;
+    outline: none;
+    transition: border-color .15s;
+  }
+  .cmd-input:focus { border-color: rgba(10,132,255,.5); }
+  .cmd-input::placeholder { color: rgba(245,245,247,.2); }
+  .cmd-input:disabled { opacity: .5; cursor: default; }
+  .cmd-input.error { border-color: rgba(255,69,58,.6); }
+
+  .cmd-select {
+    background: rgba(255,255,255,.06);
+    border: 1px solid rgba(255,255,255,.1);
+    border-radius: 7px;
+    color: #f5f5f7;
+    font-size: 13px;
+    font-family: inherit;
+    padding: 8px 10px;
+    outline: none;
+    cursor: pointer;
+    appearance: auto;
+  }
+  .cmd-select:focus { border-color: rgba(10,132,255,.5); }
+
+  .cmd-textarea {
+    background: rgba(255,255,255,.06);
+    border: 1px solid rgba(255,255,255,.1);
+    border-radius: 7px;
+    color: #f5f5f7;
+    font-size: 13px;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    padding: 8px 10px;
+    outline: none;
+    resize: vertical;
+    min-height: 80px;
+    transition: border-color .15s;
+    line-height: 1.55;
+  }
+  .cmd-textarea:focus { border-color: rgba(10,132,255,.5); }
+  .cmd-textarea::placeholder { color: rgba(245,245,247,.2); }
+
+  .cmd-field-hint {
+    font-size: 11px;
+    color: rgba(245,245,247,.35);
+    line-height: 1.5;
+  }
+  .cmd-field-hint-ok { color: #30d158; }
+
+  .cmd-field-error {
+    font-size: 11px;
+    color: #ff453a;
+  }
+
+  .cmd-checkbox-label {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 13px;
+    color: rgba(245,245,247,.7);
+    cursor: pointer;
+  }
+
+  .cmd-save-error {
+    font-size: 12px;
+    color: #ff453a;
+    margin: 0;
+    background: rgba(255,69,58,.1);
+    border: 1px solid rgba(255,69,58,.25);
+    border-radius: 6px;
+    padding: 8px 10px;
+  }
+
+  .cmd-actions {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 8px;
+    margin-top: auto;
+    padding-top: 8px;
+    border-top: 1px solid rgba(255,255,255,.06);
+  }
+
+  .cmd-delete-confirm-text {
+    font-size: 12px;
+    color: rgba(245,245,247,.5);
+    margin-right: auto;
+  }
+
+  .cmd-btn-primary {
+    background: #0a84ff;
+    border: none;
+    border-radius: 7px;
+    color: #fff;
+    font-size: 13px;
+    font-weight: 500;
+    font-family: inherit;
+    padding: 7px 18px;
+    cursor: pointer;
+    transition: opacity .15s;
+  }
+  .cmd-btn-primary:hover:not(:disabled) { opacity: .85; }
+  .cmd-btn-primary:disabled { opacity: .35; cursor: default; }
+
+  .cmd-btn-ghost {
+    background: rgba(255,255,255,.07);
+    border: 1px solid rgba(255,255,255,.1);
+    border-radius: 7px;
+    color: rgba(245,245,247,.7);
+    font-size: 13px;
+    font-weight: 500;
+    font-family: inherit;
+    padding: 7px 14px;
+    cursor: pointer;
+    transition: background .15s;
+  }
+  .cmd-btn-ghost:hover { background: rgba(255,255,255,.12); }
+
+  .cmd-btn-ghost-danger {
+    margin-right: auto;
+    color: rgba(255,69,58,.7);
+    border-color: rgba(255,69,58,.2);
+  }
+  .cmd-btn-ghost-danger:hover { color: #ff453a; background: rgba(255,69,58,.1); border-color: rgba(255,69,58,.35); }
+
+  .cmd-btn-danger {
+    background: rgba(255,69,58,.2);
+    border: 1px solid rgba(255,69,58,.4);
+    border-radius: 7px;
+    color: #ff453a;
+    font-size: 13px;
+    font-weight: 500;
+    font-family: inherit;
+    padding: 7px 14px;
+    cursor: pointer;
+    transition: background .15s;
+  }
+  .cmd-btn-danger:hover { background: rgba(255,69,58,.3); }
+
+  /* Folder headers in sidebar */
+  .cmd-folder-header {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    padding: 7px 8px 6px;
+    margin-top: 6px;
+    cursor: default;
+    user-select: none;
+    background: rgba(255,255,255,.04);
+    border: none;
+    border-top: 1px solid rgba(255,255,255,.12);
+    border-left: 2px solid rgba(10,132,255,.35);
+    border-radius: 0;
+    width: 100%;
+    text-align: left;
+    color: inherit;
+    font-family: inherit;
+  }
+  .cmd-folder-header:first-child { margin-top: 0; border-top: none; }
+  .cmd-folder-header:hover { background: rgba(255,255,255,.07); }
+
+  .cmd-folder-toggle {
+    font-size: 12px;
+    font-weight: 700;
+    color: rgba(245,245,247,.45);
+    width: 14px;
+    text-align: center;
+    flex-shrink: 0;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    line-height: 1;
+  }
+
+  .cmd-folder-name {
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.3px;
+    color: rgba(245,245,247,.55);
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .cmd-folder-count {
+    font-size: 9px;
+    color: rgba(245,245,247,.3);
+    background: rgba(255,255,255,.08);
+    border-radius: 8px;
+    padding: 1px 6px;
+    min-width: 16px;
+    text-align: center;
+    font-weight: 500;
+  }
+
+  /* Folder selection for new commands */
+  .cmd-folder-input-row {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+  }
+  .cmd-folder-select { flex: 1; min-width: 0; }
+  .cmd-folder-new-input { flex: 1; min-width: 0; }
+
+  .cmd-btn-tiny {
+    background: rgba(255,255,255,.07);
+    border: 1px solid rgba(255,255,255,.1);
+    border-radius: 5px;
+    color: rgba(245,245,247,.6);
+    font-size: 11px;
+    font-family: inherit;
+    padding: 4px 8px;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: background .15s;
+    flex-shrink: 0;
+  }
+  .cmd-btn-tiny:hover { background: rgba(255,255,255,.12); }
+  .cmd-btn-tiny:disabled { opacity: .4; cursor: default; }
+
+  .cmd-btn-create-script { color: #0a84ff; border-color: rgba(10,132,255,.3); }
+  .cmd-btn-create-script:hover { background: rgba(10,132,255,.1); }
+
+  .cmd-location-path {
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-size: 11px;
+  }
+
+  /* Actions row left group */
+  .cmd-actions-left {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-right: auto;
+  }
+
+  .cmd-btn-icon {
+    background: rgba(255,255,255,.06);
+    border: 1px solid rgba(255,255,255,.08);
+    border-radius: 5px;
+    color: rgba(245,245,247,.5);
+    width: 28px;
+    height: 28px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    transition: background .15s, color .15s;
+    padding: 0;
+  }
+  .cmd-btn-icon:hover { background: rgba(255,255,255,.12); color: rgba(245,245,247,.8); }
+
+  /* Inline script editor */
+  .cmd-script-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .cmd-script-dirty-badge {
+    font-size: 9px;
+    font-weight: 500;
+    color: #ff9f0a;
+    background: rgba(255,159,10,.12);
+    border-radius: 4px;
+    padding: 1px 5px;
+    text-transform: uppercase;
+    letter-spacing: 0.3px;
+  }
+
+  .cmd-script-textarea {
+    min-height: 140px;
+    font-size: 12px;
+    line-height: 1.5;
+    tab-size: 2;
+  }
+
+  .cmd-script-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    justify-content: flex-end;
+  }
+
+  .cmd-script-status {
+    font-size: 11px;
+    color: rgba(245,245,247,.35);
+    padding: 8px 0;
+  }
+
+  .cmd-script-not-found {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 11px;
+    color: rgba(245,245,247,.35);
+    background: rgba(255,255,255,.03);
+    border: 1px dashed rgba(255,255,255,.1);
+    border-radius: 7px;
+    padding: 10px 12px;
+  }
+  .cmd-script-not-found span { flex: 1; }
+
+  .cmd-script-external-hint {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 11px;
+    color: rgba(245,245,247,.35);
+    background: rgba(255,255,255,.03);
+    border: 1px solid rgba(255,255,255,.06);
+    border-radius: 7px;
+    padding: 10px 12px;
+    line-height: 1.5;
+  }
+  .cmd-script-external-hint span { flex: 1; }
 
 </style>

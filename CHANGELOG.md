@@ -5,6 +5,15 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [1.0.0] — 2026-04-13
+
+### Added
+- **Preferences window with command editor** — unified Preferences window with Commands and Settings tabs; visually edit all action types (`open_url`, `paste_text`, `copy_text`, `static_list`, `dynamic_list`, `script_action`) with a folder-aware sidebar, inline script editor, and file management
+- **`shared:` prefix for path substitution** — replaced `${VAR}` path substitution with the clearer `shared:` prefix convention
+- **Debugging guide** — new documentation for debugging and error reporting
+
+---
+
 ## [0.12.0] — 2026-04-10
 
 ### Added

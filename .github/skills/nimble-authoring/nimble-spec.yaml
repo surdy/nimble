@@ -5,10 +5,10 @@
 # All Copilot skills and documentation should derive schema knowledge
 # from this file.
 #
-# Last updated: 2026-04-08
-# Spec version: 12
+# Last updated: 2026-04-11
+# Spec version: 14
 
-spec_version: 13
+spec_version: 14
 
 # ── Config directory locations ──────────────────────────────────────────
 config_dirs:
@@ -116,8 +116,8 @@ action_types:
         type: string
         required: true
         description: >
-          List filename without .tsv extension (co-located with command YAML),
-          or a ${VAR}-substituted path to an external list file.
+          Plain name (co-located with command YAML, .tsv auto-appended),
+          or shared:<name> to reference a file in the shared directory.
       item_action:
         type: "enum: paste_text | copy_text | open_url"
         required: false
@@ -149,38 +149,8 @@ action_types:
         type: string
         required: true
         description: >
-          Script filename (co-located with command YAML), or ${VAR}-substituted
-          path to an external script.
-      arg:
-        type: "enum: none | optional | required"
-        required: false
-        default: none
-        description: "Controls whether the script receives a user-typed suffix argument."
-      item_action:
-        type: "enum: paste_text | copy_text | open_url"
-        required: false
-        default: null
-        description: >
-          Action performed when a list item is selected. If absent, selecting
-          an item dismisses the launcher without further action.
-    co_location: "Command YAML + script in the same directory."
-    example: |
-      action:
-        type: dynamic_list
-        config:
-          script: contacts.sh
-          arg: optional
-          item_action: paste_text
-
-  script_action:
-    description: "Run a script and immediately perform a built-in action on each returned value."
-    config:
-      script:
-        type: string
-        required: true
-        description: >
-          Script filename (co-located with command YAML), or ${VAR}-substituted
-          path to an external script.
+          Script filename (co-located with command YAML), or shared:<name>
+          to reference a script in the shared directory.
       arg:
         type: "enum: none | optional | required"
         required: false
@@ -344,17 +314,17 @@ environment_variables:
       - "Must not start with NIMBLE_ (reserved namespace)"
       - "Values are always strings (YAML auto-conversions are coerced)"
 
-  var_substitution:
+  shared_prefix:
     description: >
-      script: and list: fields can use ${VAR} tokens to reference files
-      outside the command's co-located directory.
-    available_vars: "All built-in NIMBLE_* vars plus user-defined vars."
+      script: and list: fields support two resolution modes. A plain filename
+      (e.g. hello.sh) resolves co-located with the command YAML. The shared:
+      prefix (e.g. shared:contacts.sh) resolves to <commands_root>/<shared_dir>/.
     plain_name_rule: >
-      A plain filename (no ${…}) always resolves to the command's directory,
-      unaffected by the allow_external_paths setting.
-    external_path_setting: >
-      When allow_external_paths is false in settings.yaml, ${VAR}-resolved
-      paths must still land inside the command directory.
+      A plain filename (no shared: prefix) always resolves to the command's
+      directory. Path separators (/ \) and .. are rejected for security.
+    shared_name_rule: >
+      The shared: prefix resolves to <commands_root>/<shared_dir>/<name>.
+      Only plain filenames after shared: are allowed (no / or ..).
 
 # ── Contexts ───────────────────────────────────────────────────────────
 contexts:
@@ -419,13 +389,13 @@ settings_schema:
       description: >
         true — all matching files loaded, no dedup. false — first-encountered
         command wins, DuplicateWarning surfaced for collisions.
-    allow_external_paths:
-      type: boolean
+    shared_dir:
+      type: string
       required: false
-      default: true
+      default: "shared"
       description: >
-        true — ${VAR}-substituted script/list paths may resolve outside the
-        command directory. false — resolved paths restricted to command dir.
+        Name of the shared scripts/lists subdirectory inside the commands root.
+        Scripts and lists referenced with the shared: prefix resolve here.
     commands_dir:
       type: string
       required: false
@@ -534,3 +504,10 @@ changelog:
     date: "2026-04-09"
     changes:
       - "Added NIMBLE_DEBUG built-in env var (set to '1' when debug mode is active)."
+  - version: 14
+    date: "2026-04-11"
+    changes:
+      - "Replaced ${VAR} substitution in script:/list: fields with shared: prefix."
+      - "Replaced allow_external_paths boolean setting with shared_dir string setting (default: shared)."
+      - "Renamed var_substitution section to shared_prefix with new semantics."
+      - "Scripts/lists now resolve in exactly two locations: co-located or <commands_root>/<shared_dir>/."

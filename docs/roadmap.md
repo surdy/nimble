@@ -54,7 +54,7 @@
 - [x] Built-in script environment variables — inject `NIMBLE_*` variables (`NIMBLE_CONTEXT`, `NIMBLE_PHRASE`, `NIMBLE_CONFIG_DIR`, `NIMBLE_COMMANDS_ROOT`, `NIMBLE_COMMAND_DIR`, `NIMBLE_OS`, `NIMBLE_VERSION`) into every script execution
 - [x] User-defined script variables — global `env.yaml`, command-dir sidecar `env.yaml`, and inline `env:` with deterministic precedence; reserved `NIMBLE_*` keys protected
 - [x] Spec versioning — independent integer version for `nimble-spec.yaml`, bumped on every schema/API change
-- [x] External script/list paths — `${VAR}` substitution in `script:` and `list:` fields; `allow_external_paths` setting for containment control
+- [x] Shared scripts/lists — `shared:` prefix for referencing scripts and lists in a central shared directory; configurable `shared_dir` setting (replaces `${VAR}` substitution and `allow_external_paths`)
 - [x] Custom commands directory — optional `commands_dir` setting in `settings.yaml` to load commands from an absolute path instead of the default `commands/` subdirectory
 - [x] Bundled Copilot skill — nimble-authoring skill files embedded in the binary, auto-installed to config dir, deployable via `/deploy copilot skill` command
 - [x] Script debugging & verbose logs — `/debug` toggle enables session debug mode: logs all actions, script invocations, and errors to `debug.log`; injects `NIMBLE_DEBUG=1` into scripts; surfaces errors inline; view log via `/debug log`

@@ -27,18 +27,14 @@ These are injected into every script subprocess. They always take precedence ove
 - `NIMBLE_OS` is one of exactly three values: `macos`, `linux`, `windows`.
 - `NIMBLE_DEBUG` is only set when debug mode is on (toggled via `/debug`). Scripts can check for it to emit extra diagnostic output.
 
-### `${VAR}` substitution in YAML fields
+### `shared:` prefix in YAML fields
 
-The `script:` and `list:` fields in command YAML support `${VAR}` tokens for path resolution. All built-in variables (plus user-defined ones) are available:
+The `script:` and `list:` fields in command YAML support two resolution modes:
 
-```yaml
-action:
-  type: dynamic_list
-  config:
-    script: ${SHARED_SCRIPTS}/shared-lookup.sh
-```
+- **Plain filename** (e.g. `script: hello.sh`) — resolves to the command's own directory.
+- **`shared:` prefix** (e.g. `script: shared:contacts.sh`) — resolves to `<commands_root>/<shared_dir>/`.
 
-A plain filename (no `${…}`) always resolves relative to the command's own directory.
+See [Writing Scripts — Shared scripts and lists](../guides/writing-scripts.md#shared-scripts-and-lists) for details.
 
 ---
 

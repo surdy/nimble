@@ -5,6 +5,10 @@ fn default_true() -> bool {
     true
 }
 
+fn default_shared_dir() -> String {
+    "shared".to_string()
+}
+
 /// Application-level settings persisted to `config_dir/settings.yaml`.
 /// Every field has a sensible default so a missing or partial file is safe.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -27,12 +31,11 @@ pub struct AppSettings {
     #[serde(default = "default_true")]
     pub allow_duplicates: bool,
 
-    /// Whether `script:` and `list:` fields can resolve to paths outside the
-    /// command directory via `${VAR}` substitution.
-    /// `true` (default) — external paths are allowed.
-    /// `false` — resolved paths must stay inside the command directory.
-    #[serde(default = "default_true")]
-    pub allow_external_paths: bool,
+    /// Name of the shared scripts/lists subdirectory inside the commands root.
+    /// Scripts and lists referenced with the `shared:` prefix resolve here.
+    /// Defaults to `"shared"`.
+    #[serde(default = "default_shared_dir")]
+    pub shared_dir: String,
 
     /// Whether to seed example commands into an empty commands directory on
     /// first launch. Defaults to `false`.
@@ -53,7 +56,7 @@ impl Default for AppSettings {
             hotkey: None,
             show_context_chip: true,
             allow_duplicates: true,
-            allow_external_paths: true,
+            shared_dir: default_shared_dir(),
             seed_examples: false,
             commands_dir: None,
         }
@@ -121,7 +124,7 @@ mod tests {
         assert_eq!(s.hotkey, None);
         assert!(s.show_context_chip);
         assert!(s.allow_duplicates);
-        assert!(s.allow_external_paths);
+        assert_eq!(s.shared_dir, "shared");
     }
 
     #[test]
@@ -164,7 +167,7 @@ mod tests {
             hotkey: Some("Super+Space".to_string()),
             show_context_chip: false,
             allow_duplicates: false,
-            allow_external_paths: false,
+            shared_dir: "scripts".to_string(),
             seed_examples: false,
             commands_dir: None,
         };
@@ -173,7 +176,7 @@ mod tests {
         assert_eq!(reloaded.hotkey, original.hotkey);
         assert_eq!(reloaded.show_context_chip, original.show_context_chip);
         assert_eq!(reloaded.allow_duplicates, original.allow_duplicates);
-        assert_eq!(reloaded.allow_external_paths, original.allow_external_paths);
+        assert_eq!(reloaded.shared_dir, original.shared_dir);
     }
 
     #[test]
@@ -193,19 +196,19 @@ mod tests {
         assert_eq!(s.hotkey, None);
         assert!(s.show_context_chip);
         assert!(s.allow_duplicates);
-        assert!(s.allow_external_paths);
+        assert_eq!(s.shared_dir, "shared");
     }
 
     #[test]
-    fn can_disable_allow_external_paths() {
+    fn can_set_custom_shared_dir() {
         let dir = TempDir::new().unwrap();
         std::fs::write(
             dir.path().join("settings.yaml"),
-            "allow_external_paths: false\n",
+            "shared_dir: scripts\n",
         )
         .unwrap();
         let s = load(dir.path());
-        assert!(!s.allow_external_paths);
+        assert_eq!(s.shared_dir, "scripts");
     }
 
     #[test]

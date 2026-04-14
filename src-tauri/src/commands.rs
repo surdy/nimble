@@ -131,6 +131,10 @@ pub struct Command {
     /// root. Set at load time — not present in the YAML file itself.
     #[serde(default)]
     pub source_dir: String,
+    /// Path to the YAML file itself, relative to the commands root.
+    /// Set at load time — not present in the YAML file itself.
+    #[serde(default)]
+    pub source_file: String,
 }
 
 fn default_true() -> bool {
@@ -297,7 +301,8 @@ static SEED_SCRIPTS: &[(&str, &str)] = &[
 /// Load a list from the path resolved from the `list:` field.
 ///
 /// `list_ref` is the raw value from the YAML. It may be a plain name
-/// (resolved to `<command_dir>/<list_ref>.tsv`) or contain `${VAR}` tokens.
+/// (resolved to `<command_dir>/<list_ref>.tsv`) or use the `shared:` prefix
+/// (resolved to `<commands_root>/<shared_dir>/<name>.tsv`).
 ///
 /// The file uses **TSV format**: one item per line, tab separates `title`
 /// from an optional `subtext`. Lines starting with `#` and blank lines are
@@ -357,8 +362,8 @@ pub struct ScriptEnv<'a> {
     pub command_dir: &'a Path,
     /// Merged user-defined environment variables (global → sidecar → inline).
     pub user_env: &'a HashMap<String, String>,
-    /// Whether resolved script/list paths may point outside the command directory.
-    pub allow_external_paths: bool,
+    /// Name of the shared scripts/lists subdirectory under commands_root.
+    pub shared_dir: &'a str,
     /// When true, log detailed diagnostics to `<config_dir>/debug.log` and
     /// inject `NIMBLE_DEBUG=1` into the script subprocess.
     pub debug: bool,
@@ -480,166 +485,84 @@ pub fn build_user_env(
     Ok(merged)
 }
 
-// ── Variable substitution & path resolution ───────────────────────────────────
+// ── Path resolution ───────────────────────────────────────────────────────────
 
-/// Replace `${VAR}` tokens in `template` using the combined set of user-defined
-/// and built-in variables. Returns `Err` if any referenced variable is not
-/// defined. Only `${VAR}` is supported (not `$VAR` or nested references).
-fn substitute_vars(template: &str, env: &ScriptEnv<'_>) -> Result<String, String> {
-    let mut result = String::with_capacity(template.len());
-    let mut rest = template;
-    while let Some(start) = rest.find("${") {
-        result.push_str(&rest[..start]);
-        let after = &rest[start + 2..];
-        let end = after.find('}').ok_or_else(|| {
-            format!("Unterminated ${{}} in {template:?}")
-        })?;
-        let var_name = &after[..end];
-        if var_name.is_empty() {
-            return Err(format!("Empty variable name in {template:?}"));
-        }
-        // Look up: builtins first, then user-defined.
-        let value = builtin_var_value(var_name, env)
-            .or_else(|| env.user_env.get(var_name).map(|s| s.as_str()))
-            .ok_or_else(|| {
-                format!("Undefined variable {var_name:?} in {template:?}")
-            })?;
-        result.push_str(value);
-        rest = &after[end + 1..];
-    }
-    result.push_str(rest);
-    Ok(result)
-}
-
-/// Return the value of a built-in `NIMBLE_*` variable by name, or `None`.
-fn builtin_var_value<'a>(name: &str, env: &'a ScriptEnv<'_>) -> Option<&'a str> {
-    match name {
-        "NIMBLE_CONTEXT" => Some(env.context),
-        "NIMBLE_PHRASE" => Some(env.phrase),
-        "NIMBLE_OS" => Some(if cfg!(target_os = "macos") {
-            "macos"
-        } else if cfg!(target_os = "windows") {
-            "windows"
-        } else {
-            "linux"
-        }),
-        // These return owned data via to_string_lossy — callers should use
-        // the ScriptEnv fields directly. For substitution we need a &str,
-        // so we match on the well-known names and return the path fields.
-        _ => None,
-    }
-}
-
-/// Resolve a `script:` field value to an absolute path. Performs `${VAR}`
-/// substitution. Plain filenames (no separators after substitution) resolve
-/// relative to `command_dir`. If `allow_external_paths` is false, the resolved
-/// path must be inside `command_dir`.
+/// Resolve a `script:` field value to an absolute path.
+///
+/// Two forms are supported:
+/// 1. **Plain filename** (e.g. `hello.sh`) — resolved relative to
+///    `command_dir` (co-located with the command YAML).
+/// 2. **`shared:` prefix** (e.g. `shared:contacts.sh`) — resolved relative
+///    to `<commands_root>/<shared_dir>/`.
+///
+/// `${VAR}` substitution is **not** supported in script paths.
 pub fn resolve_script_path(
     raw: &str,
     command_dir: &Path,
     env: &ScriptEnv<'_>,
 ) -> Result<PathBuf, String> {
-    // Fast path: no ${…} tokens — use legacy co-located behaviour.
-    if !raw.contains("${") {
-        // Security: reject names that could escape the command directory.
-        if raw.contains('/') || raw.contains('\\') || raw.contains("..") {
-            return Err(format!("Invalid script name: {raw:?}"));
+    // shared: prefix → resolve inside the shared directory
+    if let Some(name) = raw.strip_prefix("shared:") {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err("Empty script name after 'shared:' prefix".to_string());
         }
-        return Ok(command_dir.join(raw));
+        if name.contains('/') || name.contains('\\') || name.contains("..") {
+            return Err(format!("Invalid shared script name: {name:?}"));
+        }
+        return Ok(env.commands_root.join(env.shared_dir).join(name));
     }
 
-    // Substitute variables — need lossy conversions for path builtins.
-    let config_str = env.config_dir.to_string_lossy();
-    let cmds_root_str = env.commands_root.to_string_lossy();
-    let cmd_str = env.command_dir.to_string_lossy();
-    let version = env!("CARGO_PKG_VERSION");
-    let mut resolved = raw.to_string();
-    // Pre-substitute path-typed builtins that can't return &str easily.
-    resolved = resolved.replace("${NIMBLE_CONFIG_DIR}", &config_str);
-    resolved = resolved.replace("${NIMBLE_COMMANDS_ROOT}", &cmds_root_str);
-    resolved = resolved.replace("${NIMBLE_COMMAND_DIR}", &cmd_str);
-    resolved = resolved.replace("${NIMBLE_VERSION}", version);
-    // Now substitute remaining ${VAR} tokens.
-    let resolved = substitute_vars(&resolved, env)?;
-
-    let path = PathBuf::from(&resolved);
-    let path = if path.is_absolute() {
-        path
-    } else {
-        command_dir.join(&path)
-    };
-
-    // Enforce containment when external paths are disabled.
-    if !env.allow_external_paths {
-        let canonical_dir = command_dir.canonicalize().unwrap_or_else(|_| command_dir.to_path_buf());
-        let canonical_path = path.canonicalize().unwrap_or_else(|_| path.clone());
-        if !canonical_path.starts_with(&canonical_dir) {
-            return Err(format!(
-                "Script path {:?} (resolved from {raw:?}) is outside the command directory. \
-                 Set allow_external_paths: true in settings.yaml to allow external paths.",
-                path.display()
-            ));
-        }
+    // Plain filename — co-located with the command YAML.
+    if raw.contains('/') || raw.contains('\\') || raw.contains("..") || raw.contains("${") {
+        return Err(format!(
+            "Invalid script name: {raw:?}. Use a plain filename for co-located scripts or \
+             the shared: prefix (e.g. shared:script.sh) for shared scripts."
+        ));
     }
-
-    Ok(path)
+    Ok(command_dir.join(raw))
 }
 
-/// Resolve a `list:` field value to an absolute path. Performs `${VAR}`
-/// substitution. Plain names (no separators, no `${`) get `.tsv` appended
-/// and resolve relative to `command_dir`. Paths ending in `.tsv` are
-/// used as-is; otherwise `.tsv` is appended.
+/// Resolve a `list:` field value to an absolute path.
+///
+/// Two forms are supported:
+/// 1. **Plain name** (e.g. `team-emails`) — resolved to
+///    `<command_dir>/<name>.tsv` (co-located).
+/// 2. **`shared:` prefix** (e.g. `shared:vendors`) — resolved to
+///    `<commands_root>/<shared_dir>/<name>.tsv`.
+///
+/// `.tsv` is auto-appended unless the name already ends with `.tsv`.
+/// `${VAR}` substitution is **not** supported in list paths.
 pub fn resolve_list_path(
     raw: &str,
     command_dir: &Path,
     env: &ScriptEnv<'_>,
 ) -> Result<PathBuf, String> {
-    // Fast path: no ${…} tokens — use co-located behaviour.
-    if !raw.contains("${") {
-        if raw.contains('/') || raw.contains('\\') || raw.contains("..") {
-            return Err(format!("Invalid list name: {raw:?}"));
+    // shared: prefix → resolve inside the shared directory
+    if let Some(name) = raw.strip_prefix("shared:") {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err("Empty list name after 'shared:' prefix".to_string());
         }
-        return Ok(command_dir.join(format!("{raw}.tsv")));
+        if name.contains('/') || name.contains('\\') || name.contains("..") {
+            return Err(format!("Invalid shared list name: {name:?}"));
+        }
+        let filename = if name.ends_with(".tsv") {
+            name.to_string()
+        } else {
+            format!("{name}.tsv")
+        };
+        return Ok(env.commands_root.join(env.shared_dir).join(filename));
     }
 
-    let config_str = env.config_dir.to_string_lossy();
-    let cmds_root_str = env.commands_root.to_string_lossy();
-    let cmd_str = env.command_dir.to_string_lossy();
-    let version = env!("CARGO_PKG_VERSION");
-    let mut resolved = raw.to_string();
-    resolved = resolved.replace("${NIMBLE_CONFIG_DIR}", &config_str);
-    resolved = resolved.replace("${NIMBLE_COMMANDS_ROOT}", &cmds_root_str);
-    resolved = resolved.replace("${NIMBLE_COMMAND_DIR}", &cmd_str);
-    resolved = resolved.replace("${NIMBLE_VERSION}", version);
-    let resolved = substitute_vars(&resolved, env)?;
-
-    // Auto-append .tsv if the resolved path doesn't already have the extension.
-    let resolved = if resolved.ends_with(".tsv") {
-        resolved
-    } else {
-        format!("{resolved}.tsv")
-    };
-
-    let path = PathBuf::from(&resolved);
-    let path = if path.is_absolute() {
-        path
-    } else {
-        command_dir.join(&path)
-    };
-
-    if !env.allow_external_paths {
-        let canonical_dir = command_dir.canonicalize().unwrap_or_else(|_| command_dir.to_path_buf());
-        let canonical_path = path.canonicalize().unwrap_or_else(|_| path.clone());
-        if !canonical_path.starts_with(&canonical_dir) {
-            return Err(format!(
-                "List path {:?} (resolved from {raw:?}) is outside the command directory. \
-                 Set allow_external_paths: true in settings.yaml to allow external paths.",
-                path.display()
-            ));
-        }
+    // Plain name — co-located with the command YAML.
+    if raw.contains('/') || raw.contains('\\') || raw.contains("..") || raw.contains("${") {
+        return Err(format!(
+            "Invalid list name: {raw:?}. Use a plain name for co-located lists or \
+             the shared: prefix (e.g. shared:list-name) for shared lists."
+        ));
     }
-
-    Ok(path)
+    Ok(command_dir.join(format!("{raw}.tsv")))
 }
 
 // ── Script runner ─────────────────────────────────────────────────────────────
@@ -648,8 +571,8 @@ pub fn resolve_list_path(
 /// positional argument. Returns the parsed list of items on success.
 ///
 /// `script_ref` is the raw value from the YAML `script:` field. It may be a
-/// plain filename (resolved relative to `command_dir`) or contain `${VAR}`
-/// tokens that are substituted first.
+/// plain filename (resolved relative to `command_dir`) or use the `shared:`
+/// prefix to resolve under the shared scripts directory.
 ///
 /// A 5-second timeout is enforced; the function returns `Err` on timeout.
 pub fn run_script(
@@ -789,8 +712,8 @@ pub fn run_script(
 /// positional argument. Returns a list of string values on success.
 ///
 /// `script_ref` is the raw value from the YAML `script:` field. It may be a
-/// plain filename (resolved relative to `command_dir`) or contain `${VAR}`
-/// tokens that are substituted first.
+/// plain filename (resolved relative to `command_dir`) or use the `shared:`
+/// prefix to resolve under the shared scripts directory.
 ///
 /// Script stdout is parsed as a JSON array of strings first; if that fails,
 /// the entire trimmed output is returned as a single-element vec.
@@ -1060,6 +983,11 @@ pub fn load_from_dir(config_dir: &Path, allow_duplicates: bool, seed_examples: b
                         .unwrap_or_default();
                     let mut cmd = cmd;
                     cmd.source_dir = source_dir;
+                    cmd.source_file = path
+                        .strip_prefix(config_dir)
+                        .ok()
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_default();
                     commands.push(cmd);
                 }
             },
@@ -1198,6 +1126,7 @@ mod tests {
         }
         // source_dir should reflect the subdirectory
         assert_eq!(result.commands[0].source_dir, "sub");
+        assert_eq!(result.commands[0].source_file, "sub/show.yaml");
     }
 
     #[test]
@@ -1210,6 +1139,7 @@ mod tests {
         );
         let result = load_from_dir(dir.path(), true, false).unwrap();
         assert_eq!(result.commands[0].source_dir, "");
+        assert_eq!(result.commands[0].source_file, "open.yaml");
     }
 
     #[test]
@@ -1422,7 +1352,7 @@ mod tests {
             commands_root: config_dir,
             command_dir,
             user_env,
-            allow_external_paths: true,
+            shared_dir: "shared",
             debug: false,
         }
     }
@@ -1715,7 +1645,7 @@ mod tests {
             commands_root: dir.path(),
             command_dir: dir.path(),
             user_env: &HashMap::new(),
-            allow_external_paths: true,
+            shared_dir: "shared",
             debug: false,
         };
         let items = run_script(dir.path(), "env.sh", None, &env).unwrap();
@@ -1734,7 +1664,7 @@ mod tests {
             commands_root: dir.path(),
             command_dir: dir.path(),
             user_env: &HashMap::new(),
-            allow_external_paths: true,
+            shared_dir: "shared",
             debug: false,
         };
         let items = run_script(dir.path(), "env.sh", None, &env).unwrap();
@@ -1773,7 +1703,7 @@ mod tests {
             commands_root: dir.path(),
             command_dir: dir.path(),
             user_env: &HashMap::new(),
-            allow_external_paths: true,
+            shared_dir: "shared",
             debug: false,
         };
         let items = run_script(dir.path(), "env.sh", None, &env).unwrap();
@@ -1792,7 +1722,7 @@ mod tests {
             commands_root: dir.path(),
             command_dir: dir.path(),
             user_env: &HashMap::new(),
-            allow_external_paths: true,
+            shared_dir: "shared",
             debug: false,
         };
         let items = run_script(dir.path(), "env.sh", None, &env).unwrap();
@@ -1811,7 +1741,7 @@ mod tests {
             commands_root: dir.path(),
             command_dir: dir.path(),
             user_env: &HashMap::new(),
-            allow_external_paths: true,
+            shared_dir: "shared",
             debug: false,
         };
         let items = run_script(dir.path(), "env.sh", None, &env).unwrap();
@@ -1830,7 +1760,7 @@ mod tests {
             commands_root: dir.path(),
             command_dir: dir.path(),
             user_env: &HashMap::new(),
-            allow_external_paths: true,
+            shared_dir: "shared",
             debug: true,
         };
         let items = run_script(dir.path(), "env.sh", None, &env).unwrap();
@@ -1849,7 +1779,7 @@ mod tests {
             commands_root: dir.path(),
             command_dir: dir.path(),
             user_env: &HashMap::new(),
-            allow_external_paths: true,
+            shared_dir: "shared",
             debug: false,
         };
         let items = run_script(dir.path(), "env.sh", None, &env).unwrap();
@@ -1868,7 +1798,7 @@ mod tests {
             commands_root: dir.path(),
             command_dir: dir.path(),
             user_env: &HashMap::new(),
-            allow_external_paths: true,
+            shared_dir: "shared",
             debug: false,
         };
         let values = run_script_values(dir.path(), "env.sh", None, &env).unwrap();
@@ -1888,7 +1818,7 @@ mod tests {
             commands_root: dir.path(),
             command_dir: dir.path(),
             user_env: &HashMap::new(),
-            allow_external_paths: true,
+            shared_dir: "shared",
             debug: false,
         };
         let items = run_script(dir.path(), "env.sh", None, &env).unwrap();
@@ -2113,7 +2043,7 @@ mod tests {
             commands_root: dir.path(),
             command_dir: dir.path(),
             user_env: &user_env,
-            allow_external_paths: true,
+            shared_dir: "shared",
             debug: false,
         };
         let items = run_script(dir.path(), "env.sh", None, &env).unwrap();
@@ -2134,7 +2064,7 @@ mod tests {
             commands_root: dir.path(),
             command_dir: dir.path(),
             user_env: &user_env,
-            allow_external_paths: true,
+            shared_dir: "shared",
             debug: false,
         };
         let values = run_script_values(dir.path(), "env.sh", None, &env).unwrap();
@@ -2157,7 +2087,7 @@ mod tests {
             commands_root: dir.path(),
             command_dir: dir.path(),
             user_env: &user_env,
-            allow_external_paths: true,
+            shared_dir: "shared",
             debug: false,
         };
         let items = run_script(dir.path(), "env.sh", None, &env).unwrap();
@@ -2193,101 +2123,6 @@ mod tests {
         assert!(result.commands[0].env.is_empty());
     }
 
-    // ── substitute_vars ─────────────────────────────────────────────────────
-
-    #[test]
-    fn substitute_vars_plain_text_unchanged() {
-        let dir = TempDir::new().unwrap();
-        let env = test_env(&dir);
-        assert_eq!(substitute_vars("hello world", &env).unwrap(), "hello world");
-    }
-
-    #[test]
-    fn substitute_vars_single_builtin() {
-        let dir = TempDir::new().unwrap();
-        let env = test_env(&dir);
-        assert_eq!(
-            substitute_vars("ctx=${NIMBLE_CONTEXT}", &env).unwrap(),
-            "ctx=test-context"
-        );
-    }
-
-    #[test]
-    fn substitute_vars_multiple_vars() {
-        let dir = TempDir::new().unwrap();
-        let env = test_env(&dir);
-        assert_eq!(
-            substitute_vars("${NIMBLE_CONTEXT}-${NIMBLE_PHRASE}", &env).unwrap(),
-            "test-context-test phrase"
-        );
-    }
-
-    #[test]
-    fn substitute_vars_user_env_var() {
-        let dir = TempDir::new().unwrap();
-        let mut user_env = HashMap::new();
-        user_env.insert("MY_DIR".to_string(), "/custom/path".to_string());
-        let env = ScriptEnv {
-            context: "",
-            phrase: "",
-            config_dir: dir.path(),
-            commands_root: dir.path(),
-            command_dir: dir.path(),
-            user_env: &user_env,
-            allow_external_paths: true,
-            debug: false,
-        };
-        assert_eq!(
-            substitute_vars("${MY_DIR}/script.sh", &env).unwrap(),
-            "/custom/path/script.sh"
-        );
-    }
-
-    #[test]
-    fn substitute_vars_undefined_var_returns_err() {
-        let dir = TempDir::new().unwrap();
-        let env = test_env(&dir);
-        let result = substitute_vars("${UNDEFINED_VAR}", &env);
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("Undefined variable"));
-    }
-
-    #[test]
-    fn substitute_vars_unterminated_returns_err() {
-        let dir = TempDir::new().unwrap();
-        let env = test_env(&dir);
-        let result = substitute_vars("${NIMBLE_CONTEXT", &env);
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("Unterminated"));
-    }
-
-    #[test]
-    fn substitute_vars_empty_var_name_returns_err() {
-        let dir = TempDir::new().unwrap();
-        let env = test_env(&dir);
-        let result = substitute_vars("${}", &env);
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("Empty variable name"));
-    }
-
-    #[test]
-    fn substitute_vars_builtin_overrides_user_env() {
-        let dir = TempDir::new().unwrap();
-        let mut user_env = HashMap::new();
-        user_env.insert("NIMBLE_CONTEXT".to_string(), "evil".to_string());
-        let env = ScriptEnv {
-            context: "real",
-            phrase: "",
-            config_dir: dir.path(),
-            commands_root: dir.path(),
-            command_dir: dir.path(),
-            user_env: &user_env,
-            allow_external_paths: true,
-            debug: false,
-        };
-        assert_eq!(substitute_vars("${NIMBLE_CONTEXT}", &env).unwrap(), "real");
-    }
-
     // ── resolve_script_path ─────────────────────────────────────────────────
 
     #[test]
@@ -2299,96 +2134,61 @@ mod tests {
     }
 
     #[test]
-    fn resolve_script_path_rejects_slash_without_vars() {
+    fn resolve_script_path_rejects_slash() {
         let dir = TempDir::new().unwrap();
         let env = test_env(&dir);
         assert!(resolve_script_path("sub/hello.sh", dir.path(), &env).is_err());
     }
 
     #[test]
-    fn resolve_script_path_rejects_dotdot_without_vars() {
+    fn resolve_script_path_rejects_dotdot() {
         let dir = TempDir::new().unwrap();
         let env = test_env(&dir);
         assert!(resolve_script_path("../hello.sh", dir.path(), &env).is_err());
     }
 
     #[test]
-    fn resolve_script_path_var_substitution_absolute() {
+    fn resolve_script_path_rejects_dollar_var() {
         let dir = TempDir::new().unwrap();
-        let mut user_env = HashMap::new();
-        user_env.insert("SCRIPTS".to_string(), "/opt/scripts".to_string());
-        let env = ScriptEnv {
-            context: "",
-            phrase: "",
-            config_dir: dir.path(),
-            commands_root: dir.path(),
-            command_dir: dir.path(),
-            user_env: &user_env,
-            allow_external_paths: true,
-            debug: false,
-        };
-        let path = resolve_script_path("${SCRIPTS}/run.sh", dir.path(), &env).unwrap();
-        assert_eq!(path, PathBuf::from("/opt/scripts/run.sh"));
+        let env = test_env(&dir);
+        assert!(resolve_script_path("${SCRIPTS}/run.sh", dir.path(), &env).is_err());
     }
 
     #[test]
-    fn resolve_script_path_external_blocked_when_false() {
+    fn resolve_script_path_shared_prefix() {
         let dir = TempDir::new().unwrap();
-        make_script(&dir, "hello.sh", "#!/bin/sh\necho ok\n");
-        let mut user_env = HashMap::new();
-        user_env.insert("SCRIPTS".to_string(), "/opt/scripts".to_string());
-        let env = ScriptEnv {
-            context: "",
-            phrase: "",
-            config_dir: dir.path(),
-            commands_root: dir.path(),
-            command_dir: dir.path(),
-            user_env: &user_env,
-            allow_external_paths: false,
-            debug: false,
-        };
-        let result = resolve_script_path("${SCRIPTS}/run.sh", dir.path(), &env);
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("outside the command directory"));
+        let env = test_env(&dir);
+        let path = resolve_script_path("shared:contacts.sh", dir.path(), &env).unwrap();
+        assert_eq!(path, dir.path().join("shared").join("contacts.sh"));
     }
 
-    #[cfg(unix)]
     #[test]
-    fn resolve_script_path_command_dir_var_works_when_external_false() {
+    fn resolve_script_path_shared_prefix_trims_whitespace() {
         let dir = TempDir::new().unwrap();
-        make_script(&dir, "hello.sh", "#!/bin/sh\necho ok\n");
-        let env = ScriptEnv {
-            context: "",
-            phrase: "",
-            config_dir: dir.path(),
-            commands_root: dir.path(),
-            command_dir: dir.path(),
-            user_env: &HashMap::new(),
-            allow_external_paths: false,
-            debug: false,
-        };
-        // ${NIMBLE_COMMAND_DIR}/hello.sh should still work — it resolves inside command_dir.
-        let path = resolve_script_path("${NIMBLE_COMMAND_DIR}/hello.sh", dir.path(), &env).unwrap();
-        assert_eq!(path, dir.path().join("hello.sh"));
+        let env = test_env(&dir);
+        let path = resolve_script_path("shared: contacts.sh", dir.path(), &env).unwrap();
+        assert_eq!(path, dir.path().join("shared").join("contacts.sh"));
     }
 
-    #[cfg(unix)]
     #[test]
-    fn resolve_script_path_commands_root_var_works_when_external_false() {
+    fn resolve_script_path_shared_prefix_rejects_empty_name() {
         let dir = TempDir::new().unwrap();
-        make_script(&dir, "shared.sh", "#!/bin/sh\necho ok\n");
-        let env = ScriptEnv {
-            context: "",
-            phrase: "",
-            config_dir: dir.path(),
-            commands_root: dir.path(),
-            command_dir: dir.path(),
-            user_env: &HashMap::new(),
-            allow_external_paths: false,
-            debug: false,
-        };
-        let path = resolve_script_path("${NIMBLE_COMMANDS_ROOT}/shared.sh", dir.path(), &env).unwrap();
-        assert_eq!(path, dir.path().join("shared.sh"));
+        let env = test_env(&dir);
+        assert!(resolve_script_path("shared:", dir.path(), &env).is_err());
+    }
+
+    #[test]
+    fn resolve_script_path_shared_prefix_rejects_slash() {
+        let dir = TempDir::new().unwrap();
+        let env = test_env(&dir);
+        assert!(resolve_script_path("shared:sub/run.sh", dir.path(), &env).is_err());
+    }
+
+    #[test]
+    fn resolve_script_path_shared_prefix_rejects_dotdot() {
+        let dir = TempDir::new().unwrap();
+        let env = test_env(&dir);
+        assert!(resolve_script_path("shared:../run.sh", dir.path(), &env).is_err());
     }
 
     // ── resolve_list_path ───────────────────────────────────────────────────
@@ -2402,71 +2202,53 @@ mod tests {
     }
 
     #[test]
-    fn resolve_list_path_rejects_slash_without_vars() {
+    fn resolve_list_path_rejects_slash() {
         let dir = TempDir::new().unwrap();
         let env = test_env(&dir);
         assert!(resolve_list_path("sub/emails", dir.path(), &env).is_err());
     }
 
     #[test]
-    fn resolve_list_path_var_substitution_with_tsv_extension() {
+    fn resolve_list_path_rejects_dollar_var() {
         let dir = TempDir::new().unwrap();
-        let mut user_env = HashMap::new();
-        user_env.insert("LISTS".to_string(), "/shared/lists".to_string());
-        let env = ScriptEnv {
-            context: "",
-            phrase: "",
-            config_dir: dir.path(),
-            commands_root: dir.path(),
-            command_dir: dir.path(),
-            user_env: &user_env,
-            allow_external_paths: true,
-            debug: false,
-        };
-        let path = resolve_list_path("${LISTS}/team.tsv", dir.path(), &env).unwrap();
-        assert_eq!(path, PathBuf::from("/shared/lists/team.tsv"));
+        let env = test_env(&dir);
+        assert!(resolve_list_path("${LISTS}/team", dir.path(), &env).is_err());
     }
 
     #[test]
-    fn resolve_list_path_auto_appends_tsv_after_var() {
+    fn resolve_list_path_shared_prefix_appends_tsv() {
         let dir = TempDir::new().unwrap();
-        let mut user_env = HashMap::new();
-        user_env.insert("LISTS".to_string(), "/shared".to_string());
-        let env = ScriptEnv {
-            context: "",
-            phrase: "",
-            config_dir: dir.path(),
-            commands_root: dir.path(),
-            command_dir: dir.path(),
-            user_env: &user_env,
-            allow_external_paths: true,
-            debug: false,
-        };
-        let path = resolve_list_path("${LISTS}/team", dir.path(), &env).unwrap();
-        assert_eq!(path, PathBuf::from("/shared/team.tsv"));
+        let env = test_env(&dir);
+        let path = resolve_list_path("shared:vendors", dir.path(), &env).unwrap();
+        assert_eq!(path, dir.path().join("shared").join("vendors.tsv"));
     }
 
     #[test]
-    fn resolve_list_path_external_blocked_when_false() {
+    fn resolve_list_path_shared_prefix_preserves_tsv_extension() {
         let dir = TempDir::new().unwrap();
-        let mut user_env = HashMap::new();
-        user_env.insert("LISTS".to_string(), "/opt/lists".to_string());
-        let env = ScriptEnv {
-            context: "",
-            phrase: "",
-            config_dir: dir.path(),
-            commands_root: dir.path(),
-            command_dir: dir.path(),
-            user_env: &user_env,
-            allow_external_paths: false,
-            debug: false,
-        };
-        let result = resolve_list_path("${LISTS}/team", dir.path(), &env);
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("outside the command directory"));
+        let env = test_env(&dir);
+        let path = resolve_list_path("shared:vendors.tsv", dir.path(), &env).unwrap();
+        assert_eq!(path, dir.path().join("shared").join("vendors.tsv"));
     }
 
-    // ── settings: allow_external_paths ──────────────────────────────────────
+    #[test]
+    fn resolve_list_path_shared_prefix_rejects_empty_name() {
+        let dir = TempDir::new().unwrap();
+        let env = test_env(&dir);
+        assert!(resolve_list_path("shared:", dir.path(), &env).is_err());
+    }
 
-    // (settings tests for allow_external_paths are in settings.rs)
+    #[test]
+    fn resolve_list_path_shared_prefix_rejects_slash() {
+        let dir = TempDir::new().unwrap();
+        let env = test_env(&dir);
+        assert!(resolve_list_path("shared:sub/file", dir.path(), &env).is_err());
+    }
+
+    #[test]
+    fn resolve_list_path_shared_prefix_rejects_dotdot() {
+        let dir = TempDir::new().unwrap();
+        let env = test_env(&dir);
+        assert!(resolve_list_path("shared:../file", dir.path(), &env).is_err());
+    }
 }

@@ -104,93 +104,103 @@ See [Dynamic List](../actions/dynamic-list.md) for the full YAML schema and argu
 
 ## Security boundaries
 
-- By default, `script` and `list` field values containing `/`, `\`, or `..` are **rejected** at invocation time. Plain filenames must be co-located with the command YAML — no subdirectories or path traversal.
-- When a `script` or `list` value uses `${VAR}` substitution, the resolved path may point outside the command directory. This is allowed by default (`allow_external_paths: true` in `settings.yaml`). Set `allow_external_paths: false` to restrict all resolved paths to the command directory.
+- Plain filenames (e.g. `hello.sh`) must be co-located with the command YAML — no subdirectories or path traversal. Values containing `/`, `\`, or `..` are **rejected**.
+- The `shared:` prefix (e.g. `shared:contacts.sh`) resolves to the shared directory inside the commands root. Only plain names after `shared:` are allowed.
+- `${VAR}` substitution in `script:` and `list:` fields is **not supported**. Variable substitution was removed in favour of the simpler `shared:` prefix.
 - Scripts run with the **same user privileges** as the Nimble launcher process. They are never elevated.
 - Scripts **cannot** directly trigger launcher actions. They can only produce output. The launcher decides what to do with each item based on `item_action`.
 - Script output is parsed and validated. Malformed JSON is treated as plain text; an entirely unparseable response shows an empty list.
 
 ---
 
-## External scripts and lists
+## Shared scripts and lists
 
-By default, `script:` and `list:` fields must be plain filenames co-located with the command YAML. To reference files outside the command directory, use `${VAR}` substitution.
+Scripts and lists can live in one of two places:
 
-### How it works
+1. **Co-located** — in the same directory as the command YAML (plain filename, e.g. `script: hello.sh`)
+2. **Shared directory** — in a central `shared/` folder under the commands root, referenced with the `shared:` prefix (e.g. `script: shared:contacts.sh`)
 
-Any `${VAR}` token in a `script:` or `list:` field is replaced with the variable's value before the path is resolved. Variables are looked up in this order:
+### Setting up the shared directory
 
-1. Built-in `NIMBLE_*` variables (e.g. `NIMBLE_CONFIG_DIR`, `NIMBLE_COMMANDS_ROOT`, `NIMBLE_COMMAND_DIR`)
-2. User-defined variables (global `env.yaml` → sidecar `env.yaml` → inline `env:`)
-
-If the resolved path is absolute, it is used directly. If relative, it is resolved against the command directory.
-
-### Example: shared scripts directory
-
-```yaml
-# ~/Library/Application Support/nimble/commands/env.yaml
-SHARED_SCRIPTS: /opt/team/scripts
-```
-
-```yaml
-# commands/team-emails.yaml
-phrase: team emails
-title: Team email addresses
-action:
-  type: dynamic_list
-  config:
-    script: ${SHARED_SCRIPTS}/contacts.sh
-    arg: none
-```
-
-### Example: using an env var for shared scripts
-
-```yaml
-# commands/env.yaml — define a variable pointing to your shared scripts
-SHARED_SCRIPTS: /opt/team/scripts
-```
-
-```yaml
-# commands/run-utility/run-utility.yaml
-phrase: run utility
-title: Run shared utility
-action:
-  type: script_action
-  config:
-    script: ${SHARED_SCRIPTS}/utility.sh
-    result_action: paste_text
-```
-
-### Disabling external paths
-
-If you want to restrict scripts and lists to their co-located directories only, set `allow_external_paths: false` in `settings.yaml`:
+The shared directory defaults to `commands/shared/`. You can customise its name in `settings.yaml`:
 
 ```yaml
 # ~/Library/Application Support/nimble/settings.yaml
-allow_external_paths: false
+shared_dir: scripts    # changes the shared directory to commands/scripts/
 ```
 
-When disabled, any `${VAR}`-substituted path that resolves outside the command directory is rejected with an error. Plain filenames (without `${…}`) are always co-located and unaffected by this setting.
+### Example: shared script
+
+```
+commands/
+  shared/
+    contacts.sh        ← shared script lives here
+  work/
+    search-contacts.yaml
+```
+
+```yaml
+# commands/work/search-contacts.yaml
+phrase: search contacts
+title: Search team contacts
+action:
+  type: dynamic_list
+  config:
+    script: shared:contacts.sh
+    arg: optional
+    item_action: copy_text
+```
+
+### Example: shared list
+
+```
+commands/
+  shared/
+    vendors.tsv        ← shared list lives here
+  purchasing/
+    show-vendors.yaml
+```
+
+```yaml
+# commands/purchasing/show-vendors.yaml
+phrase: show vendors
+title: Show vendor list
+action:
+  type: static_list
+  config:
+    list: shared:vendors
+    item_action: copy_text
+```
+
+### Migrating from `${VAR}` paths
+
+If you have existing commands using `${VAR}` substitution in `script:` or `list:` fields:
+
+1. Move or symlink the external scripts into `commands/shared/`
+2. Replace `${VAR}/script.sh` with `shared:script.sh`
+3. Remove `allow_external_paths` from `settings.yaml` (the setting no longer exists)
 
 ---
 
 ## Debugging tips
 
-1. **Run the script directly** from your terminal to see its output and any errors:
+1. **Read the error in the launcher** — when a script fails, Nimble shows the error inline as a ⚠️ item. Press Enter on it to copy the message to your clipboard.
+
+2. **Turn on debug mode** — type `/debug` in the launcher to enable detailed logging. Reproduce the issue, then type `/debug log` to inspect the full log (script path, args, env, exit code, stdout, stderr, duration). See [Debugging](debugging.md) for the full guide.
+
+3. **Run the script directly** from your terminal to see its output and any errors:
    ```sh
    ~/Library/Application\ Support/Nimble/commands/search-contacts/contacts.sh "test arg"
    ```
 
-2. **Check stderr** — Nimble logs scripts' stderr output with `[ctx] script "..." stderr:` prefix. Look in the app's log output (visible when running via `npm run tauri dev`).
+4. **Validate JSON** — if items aren't appearing, paste your script's output into a JSON validator. Common issues: trailing commas, unescaped quotes, non-UTF-8 bytes.
 
-3. **Validate JSON** — if items aren't appearing, paste your script's output into a JSON validator. Common issues: trailing commas, unescaped quotes, non-UTF-8 bytes.
-
-4. **Check permissions** — on macOS/Linux the script file must be executable:
+5. **Check permissions** — on macOS/Linux the script file must be executable:
    ```sh
    chmod +x ~/Library/Application\ Support/Nimble/commands/search-contacts/contacts.sh
    ```
 
-5. **Live reload** — editing any script file in `commands/` triggers a reload. If a dynamic list is currently displayed it re-runs automatically within the 300 ms debounce window.
+6. **Live reload** — editing any script file in `commands/` triggers a reload. If a dynamic list is currently displayed it re-runs automatically within the 300 ms debounce window.
 
 ---
 

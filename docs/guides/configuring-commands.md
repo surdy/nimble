@@ -66,18 +66,18 @@ action:
 
     # --- static_list ---
     list: <string>       # name of the list file (without .tsv) co-located with the command,
-                         # or a ${VAR}-substituted path to an external list file
+                         # or shared:<name> to reference a file in the shared directory
     item_action: paste_text | copy_text | open_url   # optional
 
     # --- dynamic_list ---
     script: <string>     # name of the script file co-located with this command YAML,
-                         # or a ${VAR}-substituted path to an external script
+                         # or shared:<name> to reference a script in the shared directory
     arg: none | optional | required   # default: none
     item_action: paste_text | copy_text | open_url   # optional
 
     # --- script_action ---
     script: <string>     # name of the script file co-located with this command YAML,
-                         # or a ${VAR}-substituted path to an external script
+                         # or shared:<name> to reference a script in the shared directory
     arg: none | optional | required   # default: none
     result_action: open_url | paste_text | copy_text   # required
     prefix: <string>     # optional — prepended to each value (paste_text / copy_text only)

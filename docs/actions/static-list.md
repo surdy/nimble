@@ -15,7 +15,7 @@ commands/
     team-emails.tsv            ← list file (referenced by name)
 ```
 
-The command YAML references the list file by name (without the `.tsv` extension), or uses a `${VAR}`-substituted path for external lists (see [External scripts and lists](../guides/writing-scripts.md#external-scripts-and-lists)):
+The command YAML references the list file by name (without the `.tsv` extension), or uses the `shared:` prefix for shared lists (see [Shared scripts and lists](../guides/writing-scripts.md#shared-scripts-and-lists)):
 
 ```yaml
 action:

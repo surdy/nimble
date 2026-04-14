@@ -8,7 +8,7 @@ The **nimble-authoring** skill helps you:
 
 - Write a new command YAML from a plain-English description
 - Choose the right action type for a use case
-- Set up `env.yaml` variables or `${VAR}` substitution
+- Set up `env.yaml` variables for script runtime
 - Create static list files (TSV)
 - Configure contexts for scoped matching
 - Troubleshoot why a command isn't matching
