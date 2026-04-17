@@ -5,12 +5,19 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
-## [1.0.0] — 2026-04-13
+## [1.0.0] — 2026-04-16
 
 ### Added
-- **Preferences window with command editor** — unified Preferences window with Commands and Settings tabs; visually edit all action types (`open_url`, `paste_text`, `copy_text`, `static_list`, `dynamic_list`, `script_action`) with a folder-aware sidebar, inline script editor, and file management
+- **Preferences window with command editor** — unified Preferences window with Commands and Settings tabs for visually editing all action types (`open_url`, `paste_text`, `copy_text`, `static_list`, `dynamic_list`, `script_action`), with a folder-aware sidebar, inline script editor, directory picker, and file management
 - **`shared:` prefix for path substitution** — replaced `${VAR}` path substitution with the clearer `shared:` prefix convention
-- **Debugging guide** — new documentation for debugging and error reporting
+- **Auto-reload on settings change** — commands reload automatically when the commands directory or allow_duplicates setting changes
+- **Documentation overhaul** — added debugging guide, glossary, code signing docs, and improved action type reference pages
+
+### Changed
+- **Enter executes, Tab autocompletes** — pressing Enter now executes the first matching param-mode command; Tab autocompletes phrases
+
+### Fixed
+- **Prefix overlap resolution** — commands with overlapping phrase prefixes now both appear correctly in results
 
 ---
 

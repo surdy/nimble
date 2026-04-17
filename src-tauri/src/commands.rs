@@ -8,6 +8,16 @@ use walkdir::WalkDir;
 
 use crate::debug_log;
 
+/// Maximum wall-clock time (in seconds) a script subprocess is allowed to run
+/// before it is considered timed out.
+const SCRIPT_TIMEOUT_SECS: u64 = 5;
+
+/// Maximum number of characters captured from script stderr for debug logging.
+const STDERR_SNIPPET_LEN: usize = 500;
+
+/// Maximum number of characters captured from script stdout for debug logging.
+const STDOUT_SNIPPET_LEN: usize = 500;
+
 // ── Schema ─────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -485,6 +495,35 @@ pub fn build_user_env(
     Ok(merged)
 }
 
+// ── Filename validation ───────────────────────────────────────────────────────
+
+/// Reject names that contain path separators (`/`, `\`), or parent-directory
+/// traversals (`..`). These checks are shared by script and list path
+/// resolution as well as the Tauri `read_script_file` / `write_script_file`
+/// commands.
+pub fn validate_filename(name: &str, kind: &str) -> Result<(), String> {
+    if name.is_empty() {
+        return Err(format!("Empty {kind} name"));
+    }
+    if name.contains('/') || name.contains('\\') || name.contains("..") {
+        return Err(format!("Invalid {kind} name: {name:?}"));
+    }
+    Ok(())
+}
+
+/// Extended validation that also rejects `${…}` variable expansions.
+/// Used for user-supplied plain filenames where variable interpolation is
+/// not supported.
+fn validate_filename_no_vars(name: &str, kind: &str) -> Result<(), String> {
+    validate_filename(name, kind)?;
+    if name.contains("${") {
+        return Err(format!(
+            "Invalid {kind} name: {name:?}. Variable expansion is not supported."
+        ));
+    }
+    Ok(())
+}
+
 // ── Path resolution ───────────────────────────────────────────────────────────
 
 /// Resolve a `script:` field value to an absolute path.
@@ -507,19 +546,12 @@ pub fn resolve_script_path(
         if name.is_empty() {
             return Err("Empty script name after 'shared:' prefix".to_string());
         }
-        if name.contains('/') || name.contains('\\') || name.contains("..") {
-            return Err(format!("Invalid shared script name: {name:?}"));
-        }
+        validate_filename(name, "shared script")?;
         return Ok(env.commands_root.join(env.shared_dir).join(name));
     }
 
     // Plain filename — co-located with the command YAML.
-    if raw.contains('/') || raw.contains('\\') || raw.contains("..") || raw.contains("${") {
-        return Err(format!(
-            "Invalid script name: {raw:?}. Use a plain filename for co-located scripts or \
-             the shared: prefix (e.g. shared:script.sh) for shared scripts."
-        ));
-    }
+    validate_filename_no_vars(raw, "script")?;
     Ok(command_dir.join(raw))
 }
 
@@ -544,9 +576,7 @@ pub fn resolve_list_path(
         if name.is_empty() {
             return Err("Empty list name after 'shared:' prefix".to_string());
         }
-        if name.contains('/') || name.contains('\\') || name.contains("..") {
-            return Err(format!("Invalid shared list name: {name:?}"));
-        }
+        validate_filename(name, "shared list")?;
         let filename = if name.ends_with(".tsv") {
             name.to_string()
         } else {
@@ -556,31 +586,35 @@ pub fn resolve_list_path(
     }
 
     // Plain name — co-located with the command YAML.
-    if raw.contains('/') || raw.contains('\\') || raw.contains("..") || raw.contains("${") {
-        return Err(format!(
-            "Invalid list name: {raw:?}. Use a plain name for co-located lists or \
-             the shared: prefix (e.g. shared:list-name) for shared lists."
-        ));
-    }
+    validate_filename_no_vars(raw, "list")?;
     Ok(command_dir.join(format!("{raw}.tsv")))
 }
 
 // ── Script runner ─────────────────────────────────────────────────────────────
 
-/// Run the script identified by `script_ref`, optionally passing `arg` as a
-/// positional argument. Returns the parsed list of items on success.
+/// Raw output from a script subprocess, collected by `spawn_script`.
+struct ScriptOutput {
+    stdout: String,
+}
+
+/// Resolve, validate, spawn, and wait for a script subprocess.
 ///
-/// `script_ref` is the raw value from the YAML `script:` field. It may be a
-/// plain filename (resolved relative to `command_dir`) or use the `shared:`
-/// prefix to resolve under the shared scripts directory.
+/// This is the shared core used by both `run_script` (returns `Vec<ListItem>`)
+/// and `run_script_values` (returns `Vec<String>`). It handles:
+/// - path resolution and existence check
+/// - platform-specific command construction (PowerShell on Windows)
+/// - environment injection
+/// - timeout enforcement
+/// - stderr / stdout debug logging
 ///
-/// A 5-second timeout is enforced; the function returns `Err` on timeout.
-pub fn run_script(
+/// Returns the trimmed stdout on success, or an error message on failure.
+fn spawn_script(
     command_dir: &Path,
     script_ref: &str,
     arg: Option<&str>,
     env: &ScriptEnv<'_>,
-) -> Result<Vec<ListItem>, String> {
+    caller: &str,
+) -> Result<ScriptOutput, String> {
     let script_path = resolve_script_path(script_ref, command_dir, env)?;
     if !script_path.exists() {
         let msg = format!("Script not found: {}", script_path.display());
@@ -594,7 +628,7 @@ pub fn run_script(
         debug_log::log(
             env.config_dir,
             &format!(
-                "[SCRIPT] run_script path={} arg={:?} phrase={:?} context={:?}",
+                "[SCRIPT] {caller} path={} arg={:?} phrase={:?} context={:?}",
                 script_path.display(),
                 arg,
                 env.phrase,
@@ -635,13 +669,13 @@ pub fn run_script(
             msg
         })?;
 
-    // Enforce a 5-second timeout using a background thread + channel.
+    // Enforce timeout using a background thread + channel.
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
         let _ = tx.send(child.wait_with_output());
     });
 
-    let output = match rx.recv_timeout(Duration::from_secs(5)) {
+    let output = match rx.recv_timeout(Duration::from_secs(SCRIPT_TIMEOUT_SECS)) {
         Ok(Ok(out)) => out,
         Ok(Err(e)) => {
             let msg = format!("Script error: {e}");
@@ -651,7 +685,9 @@ pub fn run_script(
             return Err(msg);
         }
         Err(_) => {
-            let msg = format!("Script {script_ref:?} timed out after 5 seconds");
+            let msg = format!(
+                "Script {script_ref:?} timed out after {SCRIPT_TIMEOUT_SECS} seconds"
+            );
             if env.debug {
                 debug_log::log(env.config_dir, &format!("[SCRIPT] ERROR {msg}"));
             }
@@ -665,7 +701,7 @@ pub fn run_script(
         let stderr_text = String::from_utf8_lossy(&output.stderr);
         eprintln!("[nimble] script {script_ref:?} stderr: {stderr_text}");
         if env.debug {
-            let snippet: String = stderr_text.chars().take(500).collect();
+            let snippet: String = stderr_text.chars().take(STDERR_SNIPPET_LEN).collect();
             debug_log::log(
                 env.config_dir,
                 &format!("[SCRIPT] stderr: {snippet}"),
@@ -676,7 +712,7 @@ pub fn run_script(
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
 
     if env.debug {
-        let stdout_snippet: String = stdout.chars().take(500).collect();
+        let stdout_snippet: String = stdout.chars().take(STDOUT_SNIPPET_LEN).collect();
         debug_log::log(
             env.config_dir,
             &format!(
@@ -688,12 +724,33 @@ pub fn run_script(
         );
     }
 
-    if stdout.is_empty() {
+    Ok(ScriptOutput {
+        stdout,
+    })
+}
+
+/// Run the script identified by `script_ref`, optionally passing `arg` as a
+/// positional argument. Returns the parsed list of items on success.
+///
+/// `script_ref` is the raw value from the YAML `script:` field. It may be a
+/// plain filename (resolved relative to `command_dir`) or use the `shared:`
+/// prefix to resolve under the shared scripts directory.
+///
+/// A timeout of `SCRIPT_TIMEOUT_SECS` is enforced; the function returns `Err` on timeout.
+pub fn run_script(
+    command_dir: &Path,
+    script_ref: &str,
+    arg: Option<&str>,
+    env: &ScriptEnv<'_>,
+) -> Result<Vec<ListItem>, String> {
+    let result = spawn_script(command_dir, script_ref, arg, env, "run_script")?;
+
+    if result.stdout.is_empty() {
         return Ok(vec![]);
     }
 
     // Try JSON array first; fall back to treating the entire output as a single item title.
-    if let Ok(items) = serde_json::from_str::<Vec<ListItem>>(&stdout) {
+    if let Ok(items) = serde_json::from_str::<Vec<ListItem>>(&result.stdout) {
         if env.debug {
             debug_log::log(
                 env.config_dir,
@@ -703,7 +760,7 @@ pub fn run_script(
         return Ok(items);
     }
     Ok(vec![ListItem {
-        title: stdout,
+        title: result.stdout,
         subtext: None,
     }])
 }
@@ -718,125 +775,21 @@ pub fn run_script(
 /// Script stdout is parsed as a JSON array of strings first; if that fails,
 /// the entire trimmed output is returned as a single-element vec.
 ///
-/// A 5-second timeout is enforced; the function returns `Err` on timeout.
+/// A timeout of `SCRIPT_TIMEOUT_SECS` is enforced; the function returns `Err` on timeout.
 pub fn run_script_values(
     command_dir: &Path,
     script_ref: &str,
     arg: Option<&str>,
     env: &ScriptEnv<'_>,
 ) -> Result<Vec<String>, String> {
-    let script_path = resolve_script_path(script_ref, command_dir, env)?;
-    if !script_path.exists() {
-        let msg = format!("Script not found: {}", script_path.display());
-        if env.debug {
-            debug_log::log(env.config_dir, &format!("[SCRIPT] ERROR {msg}"));
-        }
-        return Err(msg);
-    }
+    let result = spawn_script(command_dir, script_ref, arg, env, "run_script_values")?;
 
-    if env.debug {
-        debug_log::log(
-            env.config_dir,
-            &format!(
-                "[SCRIPT] run_script_values path={} arg={:?} phrase={:?} context={:?}",
-                script_path.display(),
-                arg,
-                env.phrase,
-                env.context,
-            ),
-        );
-    }
-
-    let start = std::time::Instant::now();
-
-    #[cfg(windows)]
-    let mut cmd = {
-        let ext = script_path.extension().and_then(|e| e.to_str()).unwrap_or("");
-        if ext.eq_ignore_ascii_case("ps1") {
-            let mut c = std::process::Command::new("powershell");
-            c.args(["-ExecutionPolicy", "Bypass", "-File", &script_path.to_string_lossy().into_owned()]);
-            c
-        } else {
-            std::process::Command::new(&script_path)
-        }
-    };
-    #[cfg(not(windows))]
-    let mut cmd = std::process::Command::new(&script_path);
-    if let Some(a) = arg {
-        cmd.arg(a);
-    }
-    inject_env(&mut cmd, env);
-    cmd.stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped());
-
-    let child = cmd
-        .spawn()
-        .map_err(|e| {
-            let msg = format!("Could not spawn {:?}: {e}", script_path.display());
-            if env.debug {
-                debug_log::log(env.config_dir, &format!("[SCRIPT] ERROR {msg}"));
-            }
-            msg
-        })?;
-
-    let (tx, rx) = mpsc::channel();
-    std::thread::spawn(move || {
-        let _ = tx.send(child.wait_with_output());
-    });
-
-    let output = match rx.recv_timeout(Duration::from_secs(5)) {
-        Ok(Ok(out)) => out,
-        Ok(Err(e)) => {
-            let msg = format!("Script error: {e}");
-            if env.debug {
-                debug_log::log(env.config_dir, &format!("[SCRIPT] ERROR {msg}"));
-            }
-            return Err(msg);
-        }
-        Err(_) => {
-            let msg = format!("Script {script_ref:?} timed out after 5 seconds");
-            if env.debug {
-                debug_log::log(env.config_dir, &format!("[SCRIPT] ERROR {msg}"));
-            }
-            return Err(msg);
-        }
-    };
-
-    let elapsed = start.elapsed();
-
-    if !output.stderr.is_empty() {
-        let stderr_text = String::from_utf8_lossy(&output.stderr);
-        eprintln!("[nimble] script {script_ref:?} stderr: {stderr_text}");
-        if env.debug {
-            let snippet: String = stderr_text.chars().take(500).collect();
-            debug_log::log(
-                env.config_dir,
-                &format!("[SCRIPT] stderr: {snippet}"),
-            );
-        }
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-
-    if env.debug {
-        let stdout_snippet: String = stdout.chars().take(500).collect();
-        debug_log::log(
-            env.config_dir,
-            &format!(
-                "[SCRIPT] exit={} duration={}ms stdout({} chars): {stdout_snippet}",
-                output.status.code().unwrap_or(-1),
-                elapsed.as_millis(),
-                stdout.len(),
-            ),
-        );
-    }
-
-    if stdout.is_empty() {
+    if result.stdout.is_empty() {
         return Ok(vec![]);
     }
 
     // Try JSON array of strings first; fall back to treating the output as a single value.
-    if let Ok(values) = serde_json::from_str::<Vec<String>>(&stdout) {
+    if let Ok(values) = serde_json::from_str::<Vec<String>>(&result.stdout) {
         if env.debug {
             debug_log::log(
                 env.config_dir,
@@ -845,7 +798,7 @@ pub fn run_script_values(
         }
         return Ok(values);
     }
-    Ok(vec![stdout])
+    Ok(vec![result.stdout])
 }
 
 // ── Command loader ─────────────────────────────────────────────────────────────
@@ -1825,6 +1778,43 @@ mod tests {
         assert_eq!(items[0].title, "ctx=|");
     }
 
+    // ── validate_filename ──────────────────────────────────────────────────
+
+    #[test]
+    fn validate_filename_accepts_plain_name() {
+        assert!(validate_filename("hello.sh", "script").is_ok());
+    }
+
+    #[test]
+    fn validate_filename_rejects_empty() {
+        assert!(validate_filename("", "script").is_err());
+    }
+
+    #[test]
+    fn validate_filename_rejects_slash() {
+        assert!(validate_filename("sub/file.sh", "script").is_err());
+    }
+
+    #[test]
+    fn validate_filename_rejects_backslash() {
+        assert!(validate_filename("sub\\file.sh", "script").is_err());
+    }
+
+    #[test]
+    fn validate_filename_rejects_dotdot() {
+        assert!(validate_filename("../evil.sh", "script").is_err());
+    }
+
+    #[test]
+    fn validate_filename_no_vars_rejects_dollar_brace() {
+        assert!(validate_filename_no_vars("${VAR}/run.sh", "script").is_err());
+    }
+
+    #[test]
+    fn validate_filename_no_vars_accepts_plain() {
+        assert!(validate_filename_no_vars("run.sh", "script").is_ok());
+    }
+
     // ── validate_env_key ────────────────────────────────────────────────────
 
     #[test]
@@ -2250,5 +2240,794 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let env = test_env(&dir);
         assert!(resolve_list_path("shared:../file", dir.path(), &env).is_err());
+    }
+
+    // ── Additional action type variant parsing ────────────────────────────────
+
+    #[test]
+    fn parses_static_list_command_with_item_action_copy_text() {
+        let dir = TempDir::new().unwrap();
+        write_yaml(
+            &dir,
+            "show.yaml",
+            "phrase: pick item\ntitle: Items\naction:\n  type: static_list\n  config:\n    list: items\n    item_action: copy_text\n",
+        );
+        let result = load_from_dir(dir.path(), true, false).unwrap();
+        if let Action::StaticList(cfg) = &result.commands[0].action {
+            assert_eq!(cfg.item_action, Some(ItemAction::CopyText));
+        } else {
+            panic!("expected StaticList action");
+        }
+    }
+
+    #[test]
+    fn parses_static_list_command_with_item_action_open_url() {
+        let dir = TempDir::new().unwrap();
+        write_yaml(
+            &dir,
+            "show.yaml",
+            "phrase: open bookmark\ntitle: Bookmarks\naction:\n  type: static_list\n  config:\n    list: bookmarks\n    item_action: open_url\n",
+        );
+        let result = load_from_dir(dir.path(), true, false).unwrap();
+        if let Action::StaticList(cfg) = &result.commands[0].action {
+            assert_eq!(cfg.item_action, Some(ItemAction::OpenUrl));
+        } else {
+            panic!("expected StaticList action");
+        }
+    }
+
+    #[test]
+    fn parses_dynamic_list_optional_with_item_action_copy_text() {
+        let dir = TempDir::new().unwrap();
+        write_yaml(
+            &dir,
+            "dyn.yaml",
+            "phrase: search items\ntitle: Search\naction:\n  type: dynamic_list\n  config:\n    script: search.sh\n    arg: optional\n    item_action: copy_text\n",
+        );
+        let result = load_from_dir(dir.path(), true, false).unwrap();
+        if let Action::DynamicList(cfg) = &result.commands[0].action {
+            assert_eq!(cfg.arg, ArgMode::Optional);
+            assert_eq!(cfg.item_action, Some(ItemAction::CopyText));
+        } else {
+            panic!("expected DynamicList action");
+        }
+    }
+
+    #[test]
+    fn parses_dynamic_list_optional_with_item_action_open_url() {
+        let dir = TempDir::new().unwrap();
+        write_yaml(
+            &dir,
+            "dyn.yaml",
+            "phrase: search urls\ntitle: URLs\naction:\n  type: dynamic_list\n  config:\n    script: urls.sh\n    arg: optional\n    item_action: open_url\n",
+        );
+        let result = load_from_dir(dir.path(), true, false).unwrap();
+        if let Action::DynamicList(cfg) = &result.commands[0].action {
+            assert_eq!(cfg.arg, ArgMode::Optional);
+            assert_eq!(cfg.item_action, Some(ItemAction::OpenUrl));
+        } else {
+            panic!("expected DynamicList action");
+        }
+    }
+
+    #[test]
+    fn parses_dynamic_list_none_with_item_action_paste_text() {
+        let dir = TempDir::new().unwrap();
+        write_yaml(
+            &dir,
+            "dyn.yaml",
+            "phrase: list snippets\ntitle: Snippets\naction:\n  type: dynamic_list\n  config:\n    script: snippets.sh\n    arg: none\n    item_action: paste_text\n",
+        );
+        let result = load_from_dir(dir.path(), true, false).unwrap();
+        if let Action::DynamicList(cfg) = &result.commands[0].action {
+            assert_eq!(cfg.arg, ArgMode::None);
+            assert_eq!(cfg.item_action, Some(ItemAction::PasteText));
+        } else {
+            panic!("expected DynamicList action");
+        }
+    }
+
+    #[test]
+    fn parses_dynamic_list_required_without_item_action() {
+        let dir = TempDir::new().unwrap();
+        write_yaml(
+            &dir,
+            "dyn.yaml",
+            "phrase: find stuff\ntitle: Finder\naction:\n  type: dynamic_list\n  config:\n    script: find.sh\n    arg: required\n",
+        );
+        let result = load_from_dir(dir.path(), true, false).unwrap();
+        if let Action::DynamicList(cfg) = &result.commands[0].action {
+            assert_eq!(cfg.arg, ArgMode::Required);
+            assert!(cfg.item_action.is_none());
+        } else {
+            panic!("expected DynamicList action");
+        }
+    }
+
+    #[test]
+    fn parses_script_action_copy_text_with_optional_arg() {
+        let dir = TempDir::new().unwrap();
+        write_yaml(
+            &dir,
+            "sa.yaml",
+            "phrase: copy uuids\ntitle: Copy UUIDs\naction:\n  type: script_action\n  config:\n    script: uuid.sh\n    arg: optional\n    result_action: copy_text\n",
+        );
+        let result = load_from_dir(dir.path(), true, false).unwrap();
+        if let Action::ScriptAction(cfg) = &result.commands[0].action {
+            assert_eq!(cfg.arg, ArgMode::Optional);
+            assert_eq!(cfg.result_action, ResultAction::CopyText);
+            assert!(cfg.prefix.is_none());
+            assert!(cfg.suffix.is_none());
+        } else {
+            panic!("expected ScriptAction action");
+        }
+    }
+
+    #[test]
+    fn parses_script_action_open_url_with_none_arg() {
+        let dir = TempDir::new().unwrap();
+        write_yaml(
+            &dir,
+            "sa.yaml",
+            "phrase: open morning sites\ntitle: Morning sites\naction:\n  type: script_action\n  config:\n    script: morning.sh\n    arg: none\n    result_action: open_url\n",
+        );
+        let result = load_from_dir(dir.path(), true, false).unwrap();
+        if let Action::ScriptAction(cfg) = &result.commands[0].action {
+            assert_eq!(cfg.arg, ArgMode::None);
+            assert_eq!(cfg.result_action, ResultAction::OpenUrl);
+        } else {
+            panic!("expected ScriptAction action");
+        }
+    }
+
+    #[test]
+    fn parses_script_action_paste_text_with_required_prefix_suffix() {
+        let dir = TempDir::new().unwrap();
+        write_yaml(
+            &dir,
+            "sa.yaml",
+            "phrase: paste items\ntitle: Paste items\naction:\n  type: script_action\n  config:\n    script: items.sh\n    arg: required\n    result_action: paste_text\n    prefix: \"- \"\n    suffix: \"\\n\"\n",
+        );
+        let result = load_from_dir(dir.path(), true, false).unwrap();
+        if let Action::ScriptAction(cfg) = &result.commands[0].action {
+            assert_eq!(cfg.arg, ArgMode::Required);
+            assert_eq!(cfg.result_action, ResultAction::PasteText);
+            assert_eq!(cfg.prefix.as_deref(), Some("- "));
+            assert_eq!(cfg.suffix.as_deref(), Some("\n"));
+        } else {
+            panic!("expected ScriptAction action");
+        }
+    }
+
+    // ── Failure scenarios — YAML parsing ──────────────────────────────────────
+
+    #[test]
+    fn missing_phrase_field_is_skipped() {
+        let dir = TempDir::new().unwrap();
+        write_yaml(
+            &dir,
+            "bad.yaml",
+            "title: No Phrase\naction:\n  type: open_url\n  config:\n    url: https://example.com\n",
+        );
+        let result = load_from_dir(dir.path(), true, false).unwrap();
+        assert!(result.commands.is_empty(), "command without phrase should be skipped");
+    }
+
+    #[test]
+    fn missing_title_field_is_skipped() {
+        let dir = TempDir::new().unwrap();
+        write_yaml(
+            &dir,
+            "bad.yaml",
+            "phrase: test\naction:\n  type: open_url\n  config:\n    url: https://example.com\n",
+        );
+        let result = load_from_dir(dir.path(), true, false).unwrap();
+        assert!(result.commands.is_empty(), "command without title should be skipped");
+    }
+
+    #[test]
+    fn missing_action_field_is_skipped() {
+        let dir = TempDir::new().unwrap();
+        write_yaml(
+            &dir,
+            "bad.yaml",
+            "phrase: test\ntitle: Test\n",
+        );
+        let result = load_from_dir(dir.path(), true, false).unwrap();
+        assert!(result.commands.is_empty(), "command without action should be skipped");
+    }
+
+    #[test]
+    fn unknown_action_type_is_skipped() {
+        let dir = TempDir::new().unwrap();
+        write_yaml(
+            &dir,
+            "bad.yaml",
+            "phrase: test\ntitle: Test\naction:\n  type: launch_app\n  config:\n    name: Chrome\n",
+        );
+        let result = load_from_dir(dir.path(), true, false).unwrap();
+        assert!(result.commands.is_empty(), "unknown action type should be skipped");
+    }
+
+    #[test]
+    fn invalid_arg_mode_is_skipped() {
+        let dir = TempDir::new().unwrap();
+        write_yaml(
+            &dir,
+            "bad.yaml",
+            "phrase: test\ntitle: Test\naction:\n  type: dynamic_list\n  config:\n    script: test.sh\n    arg: always\n",
+        );
+        let result = load_from_dir(dir.path(), true, false).unwrap();
+        assert!(result.commands.is_empty(), "invalid arg mode should cause parse to fail");
+    }
+
+    #[test]
+    fn invalid_item_action_is_skipped() {
+        let dir = TempDir::new().unwrap();
+        write_yaml(
+            &dir,
+            "bad.yaml",
+            "phrase: test\ntitle: Test\naction:\n  type: static_list\n  config:\n    list: items\n    item_action: run_script\n",
+        );
+        let result = load_from_dir(dir.path(), true, false).unwrap();
+        assert!(result.commands.is_empty(), "invalid item_action should cause parse to fail");
+    }
+
+    #[test]
+    fn invalid_result_action_is_skipped() {
+        let dir = TempDir::new().unwrap();
+        write_yaml(
+            &dir,
+            "bad.yaml",
+            "phrase: test\ntitle: Test\naction:\n  type: script_action\n  config:\n    script: test.sh\n    result_action: execute\n",
+        );
+        let result = load_from_dir(dir.path(), true, false).unwrap();
+        assert!(result.commands.is_empty(), "invalid result_action should cause parse to fail");
+    }
+
+    #[test]
+    fn missing_url_in_open_url_is_skipped() {
+        let dir = TempDir::new().unwrap();
+        write_yaml(
+            &dir,
+            "bad.yaml",
+            "phrase: test\ntitle: Test\naction:\n  type: open_url\n  config: {}\n",
+        );
+        let result = load_from_dir(dir.path(), true, false).unwrap();
+        assert!(result.commands.is_empty(), "open_url without url should fail to parse");
+    }
+
+    #[test]
+    fn missing_text_in_paste_text_is_skipped() {
+        let dir = TempDir::new().unwrap();
+        write_yaml(
+            &dir,
+            "bad.yaml",
+            "phrase: test\ntitle: Test\naction:\n  type: paste_text\n  config: {}\n",
+        );
+        let result = load_from_dir(dir.path(), true, false).unwrap();
+        assert!(result.commands.is_empty(), "paste_text without text should fail to parse");
+    }
+
+    #[test]
+    fn missing_text_in_copy_text_is_skipped() {
+        let dir = TempDir::new().unwrap();
+        write_yaml(
+            &dir,
+            "bad.yaml",
+            "phrase: test\ntitle: Test\naction:\n  type: copy_text\n  config: {}\n",
+        );
+        let result = load_from_dir(dir.path(), true, false).unwrap();
+        assert!(result.commands.is_empty(), "copy_text without text should fail to parse");
+    }
+
+    #[test]
+    fn missing_list_in_static_list_is_skipped() {
+        let dir = TempDir::new().unwrap();
+        write_yaml(
+            &dir,
+            "bad.yaml",
+            "phrase: test\ntitle: Test\naction:\n  type: static_list\n  config: {}\n",
+        );
+        let result = load_from_dir(dir.path(), true, false).unwrap();
+        assert!(result.commands.is_empty(), "static_list without list should fail to parse");
+    }
+
+    #[test]
+    fn missing_script_in_dynamic_list_is_skipped() {
+        let dir = TempDir::new().unwrap();
+        write_yaml(
+            &dir,
+            "bad.yaml",
+            "phrase: test\ntitle: Test\naction:\n  type: dynamic_list\n  config: {}\n",
+        );
+        let result = load_from_dir(dir.path(), true, false).unwrap();
+        assert!(result.commands.is_empty(), "dynamic_list without script should fail to parse");
+    }
+
+    #[test]
+    fn missing_script_in_script_action_is_skipped() {
+        let dir = TempDir::new().unwrap();
+        write_yaml(
+            &dir,
+            "bad.yaml",
+            "phrase: test\ntitle: Test\naction:\n  type: script_action\n  config:\n    result_action: paste_text\n",
+        );
+        let result = load_from_dir(dir.path(), true, false).unwrap();
+        assert!(result.commands.is_empty(), "script_action without script should fail to parse");
+    }
+
+    #[test]
+    fn missing_result_action_in_script_action_is_skipped() {
+        let dir = TempDir::new().unwrap();
+        write_yaml(
+            &dir,
+            "bad.yaml",
+            "phrase: test\ntitle: Test\naction:\n  type: script_action\n  config:\n    script: test.sh\n",
+        );
+        let result = load_from_dir(dir.path(), true, false).unwrap();
+        assert!(result.commands.is_empty(), "script_action without result_action should fail to parse");
+    }
+
+    #[test]
+    fn empty_yaml_file_is_skipped() {
+        let dir = TempDir::new().unwrap();
+        write_yaml(&dir, "empty.yaml", "");
+        write_yaml(
+            &dir,
+            "good.yaml",
+            "phrase: open google\ntitle: Open Google\naction:\n  type: open_url\n  config:\n    url: https://www.google.com\n",
+        );
+        let result = load_from_dir(dir.path(), true, false).unwrap();
+        assert_eq!(result.commands.len(), 1, "empty file should be skipped");
+    }
+
+    #[test]
+    fn yaml_with_only_whitespace_is_skipped() {
+        let dir = TempDir::new().unwrap();
+        write_yaml(&dir, "ws.yaml", "   \n\n  \n");
+        let result = load_from_dir(dir.path(), true, false).unwrap();
+        assert!(result.commands.is_empty());
+    }
+
+    #[test]
+    fn multiple_malformed_files_do_not_prevent_valid_loading() {
+        let dir = TempDir::new().unwrap();
+        write_yaml(&dir, "bad1.yaml", "not: valid: yaml: ::::");
+        write_yaml(&dir, "bad2.yaml", "phrase: test\n");
+        write_yaml(&dir, "bad3.yaml", "");
+        write_yaml(
+            &dir,
+            "good.yaml",
+            "phrase: open google\ntitle: Open Google\naction:\n  type: open_url\n  config:\n    url: https://www.google.com\n",
+        );
+        let result = load_from_dir(dir.path(), true, false).unwrap();
+        assert_eq!(result.commands.len(), 1, "only valid command should load");
+        assert_eq!(result.commands[0].phrase, "open google");
+    }
+
+    // ── Failure scenarios — script execution ─────────────────────────────────
+
+    #[cfg(unix)]
+    #[test]
+    fn run_script_nonzero_exit_returns_output() {
+        let dir = TempDir::new().unwrap();
+        make_script(&dir, "fail.sh", "#!/bin/sh\necho 'partial output'\nexit 1\n");
+        let env = test_env(&dir);
+        // Non-zero exit still returns whatever stdout was produced
+        let items = run_script(dir.path(), "fail.sh", None, &env).unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].title, "partial output");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_script_empty_output_returns_empty_vec() {
+        let dir = TempDir::new().unwrap();
+        make_script(&dir, "empty.sh", "#!/bin/sh\n");
+        let env = test_env(&dir);
+        let items = run_script(dir.path(), "empty.sh", None, &env).unwrap();
+        assert!(items.is_empty(), "empty stdout should return empty vec");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_script_values_empty_output_returns_empty_vec() {
+        let dir = TempDir::new().unwrap();
+        make_script(&dir, "empty.sh", "#!/bin/sh\n");
+        let env = test_env(&dir);
+        let values = run_script_values(dir.path(), "empty.sh", None, &env).unwrap();
+        assert!(values.is_empty(), "empty stdout should return empty vec");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_script_malformed_json_falls_back_to_plain_text() {
+        let dir = TempDir::new().unwrap();
+        make_script(&dir, "bad-json.sh", "#!/bin/sh\necho '[{\"title\": broken'\n");
+        let env = test_env(&dir);
+        let items = run_script(dir.path(), "bad-json.sh", None, &env).unwrap();
+        assert_eq!(items.len(), 1, "malformed JSON should fall back to plain text");
+        assert!(items[0].title.contains("broken"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_script_values_malformed_json_falls_back_to_plain_text() {
+        let dir = TempDir::new().unwrap();
+        make_script(&dir, "bad-json.sh", "#!/bin/sh\necho '[\"alpha\", broken'\n");
+        let env = test_env(&dir);
+        let values = run_script_values(dir.path(), "bad-json.sh", None, &env).unwrap();
+        assert_eq!(values.len(), 1, "malformed JSON should fall back to single value");
+        assert!(values[0].contains("broken"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_script_not_executable_returns_err() {
+        let dir = TempDir::new().unwrap();
+        // Write a script file but DON'T set executable permission
+        fs::write(dir.path().join("no-exec.sh"), "#!/bin/sh\necho hello\n").unwrap();
+        let env = test_env(&dir);
+        let result = run_script(dir.path(), "no-exec.sh", None, &env);
+        assert!(result.is_err(), "non-executable script should fail to spawn");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_script_stderr_does_not_affect_result() {
+        let dir = TempDir::new().unwrap();
+        make_script(
+            &dir,
+            "stderr.sh",
+            "#!/bin/sh\necho 'good output'\necho 'error info' >&2\n",
+        );
+        let env = test_env(&dir);
+        let items = run_script(dir.path(), "stderr.sh", None, &env).unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].title, "good output");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_script_with_none_arg_passes_no_args() {
+        let dir = TempDir::new().unwrap();
+        make_script(&dir, "count-args.sh", "#!/bin/sh\necho \"$#\"\n");
+        let env = test_env(&dir);
+        let items = run_script(dir.path(), "count-args.sh", None, &env).unwrap();
+        assert_eq!(items[0].title, "0");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_script_with_empty_string_arg() {
+        let dir = TempDir::new().unwrap();
+        make_script(&dir, "echo-arg.sh", "#!/bin/sh\necho \"arg=[$1]\"\n");
+        let env = test_env(&dir);
+        let items = run_script(dir.path(), "echo-arg.sh", Some(""), &env).unwrap();
+        assert_eq!(items[0].title, "arg=[]");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_script_with_special_chars_in_arg() {
+        let dir = TempDir::new().unwrap();
+        make_script(&dir, "echo-arg.sh", "#!/bin/sh\necho \"$1\"\n");
+        let env = test_env(&dir);
+        let items = run_script(dir.path(), "echo-arg.sh", Some("hello world & 'quotes'"), &env).unwrap();
+        assert_eq!(items[0].title, "hello world & 'quotes'");
+    }
+
+    // ── Failure scenarios — TSV list loading ─────────────────────────────────
+
+    #[test]
+    fn load_list_empty_file_returns_empty_vec() {
+        let dir = TempDir::new().unwrap();
+        write_list(&dir, "empty", "");
+        let env = test_env(&dir);
+        let items = load_list(dir.path(), "empty", &env).unwrap();
+        assert!(items.is_empty());
+    }
+
+    #[test]
+    fn load_list_only_comments_returns_empty_vec() {
+        let dir = TempDir::new().unwrap();
+        write_list(&dir, "comments", "# just a comment\n# another comment\n");
+        let env = test_env(&dir);
+        let items = load_list(dir.path(), "comments", &env).unwrap();
+        assert!(items.is_empty());
+    }
+
+    #[test]
+    fn load_list_tab_only_lines_are_skipped() {
+        let dir = TempDir::new().unwrap();
+        write_list(&dir, "tabs", "\t\n\t\t\nAlice\talice@example.com\n");
+        let env = test_env(&dir);
+        let items = load_list(dir.path(), "tabs", &env).unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].title, "Alice");
+    }
+
+    // ── Ambiguity — duplicate phrase ordering ────────────────────────────────
+
+    #[test]
+    fn duplicate_phrase_case_insensitive() {
+        let dir = TempDir::new().unwrap();
+        write_yaml(
+            &dir,
+            "a.yaml",
+            "phrase: Open Google\ntitle: First\naction:\n  type: open_url\n  config:\n    url: https://www.google.com\n",
+        );
+        write_yaml(
+            &dir,
+            "b.yaml",
+            "phrase: open google\ntitle: Second\naction:\n  type: open_url\n  config:\n    url: https://duckduckgo.com\n",
+        );
+        let result = load_from_dir(dir.path(), false, false).unwrap();
+        assert_eq!(result.commands.len(), 1, "case-insensitive duplicate should be caught");
+        assert_eq!(result.duplicates.len(), 1);
+    }
+
+    #[test]
+    fn multiple_duplicates_of_same_phrase() {
+        let dir = TempDir::new().unwrap();
+        write_yaml(
+            &dir,
+            "a.yaml",
+            "phrase: open google\ntitle: First\naction:\n  type: open_url\n  config:\n    url: https://a.com\n",
+        );
+        write_yaml(
+            &dir,
+            "b.yaml",
+            "phrase: open google\ntitle: Second\naction:\n  type: open_url\n  config:\n    url: https://b.com\n",
+        );
+        write_yaml(
+            &dir,
+            "c.yaml",
+            "phrase: open google\ntitle: Third\naction:\n  type: open_url\n  config:\n    url: https://c.com\n",
+        );
+        let result = load_from_dir(dir.path(), false, false).unwrap();
+        assert_eq!(result.commands.len(), 1, "only one command survives");
+        assert_eq!(result.duplicates.len(), 2, "two duplicate warnings");
+    }
+
+    #[test]
+    fn duplicates_of_different_phrases_tracked_separately() {
+        let dir = TempDir::new().unwrap();
+        write_yaml(
+            &dir,
+            "a-open.yaml",
+            "phrase: open google\ntitle: First Open\naction:\n  type: open_url\n  config:\n    url: https://a.com\n",
+        );
+        write_yaml(
+            &dir,
+            "b-open.yaml",
+            "phrase: open google\ntitle: Second Open\naction:\n  type: open_url\n  config:\n    url: https://b.com\n",
+        );
+        write_yaml(
+            &dir,
+            "a-paste.yaml",
+            "phrase: paste email\ntitle: First Paste\naction:\n  type: paste_text\n  config:\n    text: a@test.com\n",
+        );
+        write_yaml(
+            &dir,
+            "b-paste.yaml",
+            "phrase: paste email\ntitle: Second Paste\naction:\n  type: paste_text\n  config:\n    text: b@test.com\n",
+        );
+        let result = load_from_dir(dir.path(), false, false).unwrap();
+        assert_eq!(result.commands.len(), 2, "one of each phrase survives");
+        assert_eq!(result.duplicates.len(), 2, "one duplicate warning per phrase");
+    }
+
+    #[test]
+    fn allow_duplicates_still_rejects_reserved_phrases() {
+        let dir = TempDir::new().unwrap();
+        write_yaml(
+            &dir,
+            "reserved.yaml",
+            "phrase: /ctx set work\ntitle: Bad\naction:\n  type: open_url\n  config:\n    url: https://example.com\n",
+        );
+        write_yaml(
+            &dir,
+            "good.yaml",
+            "phrase: open google\ntitle: Good\naction:\n  type: open_url\n  config:\n    url: https://google.com\n",
+        );
+        let result = load_from_dir(dir.path(), true, false).unwrap();
+        assert_eq!(result.commands.len(), 1, "only non-reserved command loads");
+        assert_eq!(result.reserved.len(), 1, "reserved phrase still caught");
+    }
+
+    #[test]
+    fn disabled_command_not_counted_as_duplicate() {
+        let dir = TempDir::new().unwrap();
+        write_yaml(
+            &dir,
+            "a.yaml",
+            "phrase: open google\ntitle: Disabled\nenabled: false\naction:\n  type: open_url\n  config:\n    url: https://disabled.com\n",
+        );
+        write_yaml(
+            &dir,
+            "b.yaml",
+            "phrase: open google\ntitle: Enabled\naction:\n  type: open_url\n  config:\n    url: https://enabled.com\n",
+        );
+        let result = load_from_dir(dir.path(), false, false).unwrap();
+        assert_eq!(result.commands.len(), 1, "enabled command loads");
+        assert!(result.duplicates.is_empty(), "disabled command does not trigger duplicate");
+        assert_eq!(result.commands[0].title, "Enabled");
+    }
+
+    #[test]
+    fn malformed_command_not_counted_as_duplicate() {
+        let dir = TempDir::new().unwrap();
+        write_yaml(
+            &dir,
+            "bad.yaml",
+            "phrase: open google\ntitle: Bad\naction:\n  type: unknown_type\n  config:\n    x: y\n",
+        );
+        write_yaml(
+            &dir,
+            "good.yaml",
+            "phrase: open google\ntitle: Good\naction:\n  type: open_url\n  config:\n    url: https://google.com\n",
+        );
+        let result = load_from_dir(dir.path(), false, false).unwrap();
+        assert_eq!(result.commands.len(), 1, "valid command loads");
+        assert!(result.duplicates.is_empty(), "malformed file does not count as duplicate");
+    }
+
+    #[test]
+    fn mixed_reserved_disabled_malformed_valid() {
+        let dir = TempDir::new().unwrap();
+        write_yaml(
+            &dir,
+            "reserved.yaml",
+            "phrase: /ctx set\ntitle: Reserved\naction:\n  type: open_url\n  config:\n    url: https://reserved.com\n",
+        );
+        write_yaml(
+            &dir,
+            "disabled.yaml",
+            "phrase: disabled cmd\ntitle: Disabled\nenabled: false\naction:\n  type: open_url\n  config:\n    url: https://disabled.com\n",
+        );
+        write_yaml(
+            &dir,
+            "malformed.yaml",
+            "this is not valid yaml ::::\n",
+        );
+        write_yaml(
+            &dir,
+            "good1.yaml",
+            "phrase: open google\ntitle: Open Google\naction:\n  type: open_url\n  config:\n    url: https://google.com\n",
+        );
+        write_yaml(
+            &dir,
+            "good2.yaml",
+            "phrase: paste email\ntitle: Paste Email\naction:\n  type: paste_text\n  config:\n    text: test@test.com\n",
+        );
+        let result = load_from_dir(dir.path(), true, false).unwrap();
+        assert_eq!(result.commands.len(), 2, "only valid+enabled commands load");
+        assert_eq!(result.reserved.len(), 1, "reserved phrase tracked");
+    }
+
+    #[test]
+    fn commands_from_subdirectories_load_alongside_root() {
+        let dir = TempDir::new().unwrap();
+        write_yaml(
+            &dir,
+            "root.yaml",
+            "phrase: open google\ntitle: Root\naction:\n  type: open_url\n  config:\n    url: https://google.com\n",
+        );
+        write_yaml(
+            &dir,
+            "sub/nested.yaml",
+            "phrase: paste email\ntitle: Nested\naction:\n  type: paste_text\n  config:\n    text: test@test.com\n",
+        );
+        write_yaml(
+            &dir,
+            "deep/a/b/deep.yaml",
+            "phrase: copy text\ntitle: Deep\naction:\n  type: copy_text\n  config:\n    text: deep\n",
+        );
+        let result = load_from_dir(dir.path(), true, false).unwrap();
+        assert_eq!(result.commands.len(), 3, "all nested levels load");
+    }
+
+    #[test]
+    fn empty_directory_returns_no_commands() {
+        let dir = TempDir::new().unwrap();
+        let result = load_from_dir(dir.path(), true, false).unwrap();
+        assert!(result.commands.is_empty());
+        assert!(result.duplicates.is_empty());
+        assert!(result.reserved.is_empty());
+    }
+
+    #[test]
+    fn load_from_nonexistent_dir_creates_it() {
+        let dir = TempDir::new().unwrap();
+        let new_dir = dir.path().join("does-not-exist");
+        assert!(!new_dir.exists());
+        let result = load_from_dir(&new_dir, true, false).unwrap();
+        assert!(new_dir.exists(), "directory should be created");
+        assert!(result.commands.is_empty());
+    }
+
+    // ── Env var edge cases ───────────────────────────────────────────────────
+
+    #[test]
+    fn load_env_yaml_null_value_coerced_to_empty_string() {
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("env.yaml"), "EMPTY_VAR:\n").unwrap();
+        let result = load_env_yaml(&dir.path().join("env.yaml")).unwrap();
+        assert_eq!(result.get("EMPTY_VAR").unwrap(), "");
+    }
+
+    #[test]
+    fn validate_env_key_rejects_space() {
+        assert!(validate_env_key("MY VAR", "test").is_err());
+    }
+
+    #[test]
+    fn validate_env_key_rejects_equals() {
+        assert!(validate_env_key("MY=VAR", "test").is_err());
+    }
+
+    // ── Shared script/list resolution ────────────────────────────────────────
+
+    #[test]
+    fn resolve_script_path_shared_uses_custom_shared_dir() {
+        let dir = TempDir::new().unwrap();
+        let user_env: &'static HashMap<String, String> =
+            Box::leak(Box::new(HashMap::new()));
+        let config_dir: &'static Path = Box::leak(dir.path().to_path_buf().into_boxed_path());
+        let env = ScriptEnv {
+            context: "",
+            phrase: "test",
+            config_dir,
+            commands_root: config_dir,
+            command_dir: config_dir,
+            user_env,
+            shared_dir: "my-scripts",
+            debug: false,
+        };
+        let path = resolve_script_path("shared:run.sh", dir.path(), &env).unwrap();
+        assert_eq!(path, dir.path().join("my-scripts").join("run.sh"));
+    }
+
+    #[test]
+    fn resolve_list_path_shared_uses_custom_shared_dir() {
+        let dir = TempDir::new().unwrap();
+        let user_env: &'static HashMap<String, String> =
+            Box::leak(Box::new(HashMap::new()));
+        let config_dir: &'static Path = Box::leak(dir.path().to_path_buf().into_boxed_path());
+        let env = ScriptEnv {
+            context: "",
+            phrase: "test",
+            config_dir,
+            commands_root: config_dir,
+            command_dir: config_dir,
+            user_env,
+            shared_dir: "my-lists",
+            debug: false,
+        };
+        let path = resolve_list_path("shared:emails", dir.path(), &env).unwrap();
+        assert_eq!(path, dir.path().join("my-lists").join("emails.tsv"));
+    }
+
+    #[test]
+    fn resolve_script_path_rejects_backslash() {
+        let dir = TempDir::new().unwrap();
+        let env = test_env(&dir);
+        assert!(resolve_script_path("sub\\hello.sh", dir.path(), &env).is_err());
+    }
+
+    #[test]
+    fn resolve_list_path_rejects_backslash() {
+        let dir = TempDir::new().unwrap();
+        let env = test_env(&dir);
+        assert!(resolve_list_path("sub\\emails", dir.path(), &env).is_err());
+    }
+
+    #[test]
+    fn resolve_list_path_rejects_dotdot() {
+        let dir = TempDir::new().unwrap();
+        let env = test_env(&dir);
+        assert!(resolve_list_path("../secret", dir.path(), &env).is_err());
     }
 }

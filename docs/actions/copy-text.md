@@ -27,3 +27,17 @@ action:
   config:
     text: hello@example.com
 ```
+
+---
+
+## When to use
+
+- You want to paste manually into a specific location
+- The target app blocks simulated keystrokes
+- You don't want to grant Accessibility permission on macOS
+
+---
+
+## See also
+
+- [Paste Text](paste-text.md) — writes to the clipboard *and* simulates a paste keystroke

@@ -58,6 +58,21 @@ The log file is written to `debug.log` inside your [config directory](../referen
 %APPDATA%\nimble\debug.log                           # Windows
 ```
 
+### Sample log output
+
+```
+[2026-04-16 09:12:01] ACTION open_url → https://github.com
+[2026-04-16 09:12:15] SCRIPT commands/say-hello/hello.sh (arg: none)
+  env: NIMBLE_CONTEXT= NIMBLE_CONFIG_DIR=/Users/you/Library/Application Support/nimble
+  exit: 0  (42 ms)
+  stdout: [{"title":"Hello, world!","subtext":"A friendly greeting"}]
+  stderr: (empty)
+[2026-04-16 09:12:22] ACTION paste_text → "Best regards,\nJane Smith"
+[2026-04-16 09:12:30] ERROR script_action commands/broken/fail.sh
+  exit: 1  (108 ms)
+  stderr: /bin/sh: line 3: jq: command not found
+```
+
 ### `NIMBLE_DEBUG` environment variable
 
 When debug mode is active, Nimble sets `NIMBLE_DEBUG=1` in the environment of every script it runs. Scripts can check for this to emit extra diagnostic output:

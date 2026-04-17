@@ -21,7 +21,7 @@ When you type `open github` (or any substring of it) in the launcher and press `
 
 ## With parameter substitution
 
-Add `{param}` anywhere in the URL to capture extra text the user types after the command phrase.
+Add `{param}` anywhere in the URL to capture extra text the user types after the phrase.
 
 ```yaml
 phrase: search google
@@ -32,7 +32,7 @@ action:
     url: https://www.google.com/search?q={param}
 ```
 
-Typing `search google rust programming` opens `https://www.google.com/search?q=rust+programming`. The text after the matched phrase is URL-encoded automatically.
+Typing `search google rust programming` opens `https://www.google.com/search?q=rust+programming`. The text after the matched phrase is URL-encoded automatically — spaces become `+`, special characters become percent-encoded, so you never need to encode the value yourself.
 
 ---
 

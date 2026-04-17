@@ -43,7 +43,7 @@ commands/
 
 ```yaml
 # Required fields
-phrase: <string>         # multi-word phrase users type to trigger this command
+phrase: <string>         # phrase users type to trigger this command
 title: <string>          # human-readable label shown as the result title
 
 # Optional fields

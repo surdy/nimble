@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <em>A fast, cross-platform desktop launcher driven entirely by commands — think Alfred or Raycast, built around multi-word phrase commands with real-time partial matching and extensibility through sandboxed scripts.</em>
+  <em>A fast, cross-platform desktop launcher driven entirely by commands — think Alfred or Raycast, built around multi-word phrases with real-time partial matching and extensibility through sandboxed scripts.</em>
 </p>
 
 ---
@@ -32,6 +32,11 @@ When you invoke the launcher and start typing, Nimble shows partial matches in r
 - **Copy Text** — copy pre-defined text to the clipboard without simulating a keystroke
 - **Static List** — display a named YAML list of items inline as soon as the phrase is typed; selecting an item can paste, copy, or open a URL
 - **Dynamic List** — run an external script and show its output as an inline list; supports `none`, `optional`, and `required` argument modes for real-time filtering
+- **Script Action** — run a script on command execution and apply the result as a paste, copy, or open-URL action
+
+### More capabilities
+- **Contexts** — set a persistent keyword that silently narrows all command matching to a topic; switch research sessions or project scopes without retyping
+- **Copilot Skill** — an AI skill that helps you create commands and write scripts directly from GitHub Copilot Chat
 
 ---
 

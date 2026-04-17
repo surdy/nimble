@@ -12,7 +12,7 @@ When a context is active, Nimble substitutes your raw input with:
 effective input = raw input + " " + context
 ```
 
-**Exception — parameter mode:** if the raw input already matches a known command phrase plus trailing text (a parameter), context is **not** appended. This keeps user-supplied parameters clean; scripts and URLs receive only what the user explicitly typed. Scripts can still read the active context via the `NIMBLE_CONTEXT` environment variable.
+**Exception — parameter mode:** if the raw input already matches a known phrase plus trailing text (a parameter), context is **not** appended. This keeps user-supplied parameters clean; scripts and URLs receive only what the user explicitly typed. Scripts can still read the active context via the `NIMBLE_CONTEXT` environment variable.
 
 This means:
 

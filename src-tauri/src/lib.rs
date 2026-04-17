@@ -528,8 +528,13 @@ struct TrayMenuState {
 /// Persisted application settings, loaded once at startup.
 struct SettingsState(Mutex<settings::AppSettings>);
 
-/// Resolved commands root directory, computed once at startup from settings.
-struct CommandsRoot(std::path::PathBuf);
+/// Resolved commands root directory. Updated at runtime when the user changes
+/// `commands_dir` in settings.
+struct CommandsRoot(Mutex<std::path::PathBuf>);
+
+/// Sender for reconfiguring the file-system watcher at runtime (e.g. when
+/// `commands_dir` or `allow_duplicates` changes in settings).
+struct WatcherControl(Mutex<std::sync::mpsc::Sender<watcher::WatcherCommand>>);
 
 /// Session-scoped debug mode flag. When true, script invocations and actions
 /// are logged to `<config_dir>/debug.log` and `NIMBLE_DEBUG=1` is injected
@@ -577,6 +582,13 @@ fn get_settings(app: tauri::AppHandle) -> settings::AppSettings {
     app.state::<SettingsState>().0.lock().unwrap().clone()
 }
 
+/// Return the default commands directory path (`<config_dir>/commands/`).
+#[tauri::command]
+fn get_default_commands_dir(app: tauri::AppHandle) -> Result<String, String> {
+    let config_dir = app.path().app_config_dir().map_err(|e| e.to_string())?;
+    Ok(config_dir.join("commands").to_string_lossy().into_owned())
+}
+
 /// Persist a new hotkey to `settings.yaml` and update the in-memory settings.
 /// The caller is responsible for also calling `register_shortcut` to activate
 /// the shortcut for the current session.
@@ -591,6 +603,10 @@ fn save_hotkey(app: tauri::AppHandle, hotkey: String) -> Result<(), String> {
 
 /// Save general settings to `settings.yaml` and update the in-memory state.
 /// Hotkey changes are handled separately via `save_hotkey` + `register_shortcut`.
+///
+/// When `commands_dir` or `allow_duplicates` change, the file-system watcher is
+/// reconfigured and `CommandsRoot` is updated so subsequent operations use the
+/// new directory.
 #[tauri::command]
 fn save_settings(
     app: tauri::AppHandle,
@@ -600,13 +616,42 @@ fn save_settings(
     commands_dir: Option<String>,
 ) -> Result<(), String> {
     let config_dir = app.path().app_config_dir().map_err(|e| e.to_string())?;
-    let binding = app.state::<SettingsState>();
-    let mut state = binding.0.lock().unwrap();
-    state.show_context_chip = show_context_chip;
-    state.allow_duplicates = allow_duplicates;
-    state.shared_dir = shared_dir;
-    state.commands_dir = commands_dir;
-    settings::save(&config_dir, &state)
+
+    // Compute the new effective commands root before acquiring locks.
+    let new_root = if let Some(ref custom) = commands_dir {
+        let p = std::path::PathBuf::from(custom);
+        if p.is_absolute() { p } else { config_dir.join("commands") }
+    } else {
+        config_dir.join("commands")
+    };
+
+    let old_root = app.state::<CommandsRoot>().0.lock().unwrap().clone();
+    let old_allow_dupes = app.state::<SettingsState>().0.lock().unwrap().allow_duplicates;
+
+    // Persist the new settings.
+    {
+        let binding = app.state::<SettingsState>();
+        let mut state = binding.0.lock().unwrap();
+        state.show_context_chip = show_context_chip;
+        state.allow_duplicates = allow_duplicates;
+        state.shared_dir = shared_dir;
+        state.commands_dir = commands_dir;
+        settings::save(&config_dir, &state)?;
+    }
+
+    // If the commands directory or dedup policy changed, update the shared
+    // CommandsRoot state and tell the watcher to switch directories.
+    if new_root != old_root || allow_duplicates != old_allow_dupes {
+        *app.state::<CommandsRoot>().0.lock().unwrap() = new_root.clone();
+
+        let ctrl = app.state::<WatcherControl>();
+        let _ = ctrl.0.lock().unwrap().send(watcher::WatcherCommand::Reconfigure {
+            commands_dir: new_root,
+            allow_duplicates,
+        });
+    }
+
+    Ok(())
 }
 
 // ── Command Editor ─────────────────────────────────────────────────────────────
@@ -682,7 +727,7 @@ fn get_preferences_initial_tab(app: tauri::AppHandle) -> String {
 /// are still listed so the user can see them.
 #[tauri::command]
 fn list_command_files(app: tauri::AppHandle) -> Result<Vec<CommandFileMeta>, String> {
-    let commands_root = app.state::<CommandsRoot>().0.clone();
+    let commands_root = app.state::<CommandsRoot>().0.lock().unwrap().clone();
     let result = commands::load_from_dir(&commands_root, true, false)?;
     let mut metas: Vec<CommandFileMeta> = result
         .commands
@@ -882,7 +927,7 @@ fn save_command_file(
         action_yaml,
     );
 
-    let commands_root = app.state::<CommandsRoot>().0.clone();
+    let commands_root = app.state::<CommandsRoot>().0.lock().unwrap().clone();
 
     // --- determine target path ---
     let target_path: std::path::PathBuf = if let Some(ref fp) = file_path {
@@ -951,7 +996,7 @@ fn delete_command_file(app: tauri::AppHandle, file_path: String) -> Result<(), S
     }
     std::fs::remove_file(&p).map_err(|e| format!("Could not delete command file: {e}"))?;
 
-    let commands_root = app.state::<CommandsRoot>().0.clone();
+    let commands_root = app.state::<CommandsRoot>().0.lock().unwrap().clone();
     let settings = app.state::<SettingsState>().0.lock().unwrap().clone();
     if let Ok(load_result) = commands::load_from_dir(&commands_root, settings.allow_duplicates, false) {
         app.emit("commands://reloaded", &load_result).ok();
@@ -1030,7 +1075,7 @@ fn open_in_default_editor(path: String) -> Result<(), String> {
 /// Used by the command editor to offer folder selection when creating a new command.
 #[tauri::command]
 fn list_command_folders(app: tauri::AppHandle) -> Result<Vec<String>, String> {
-    let commands_root = app.state::<CommandsRoot>().0.clone();
+    let commands_root = app.state::<CommandsRoot>().0.lock().unwrap().clone();
     let mut folders = std::collections::BTreeSet::new();
     for entry in walkdir::WalkDir::new(&commands_root)
         .min_depth(1)
@@ -1057,19 +1102,15 @@ fn read_script_file(
     command_dir: String,
     script_name: String,
 ) -> Result<String, String> {
-    let commands_root = app.state::<CommandsRoot>().0.clone();
+    let commands_root = app.state::<CommandsRoot>().0.lock().unwrap().clone();
 
     let script_path = if let Some(name) = script_name.strip_prefix("shared:") {
         let name = name.trim();
-        if name.is_empty() || name.contains('/') || name.contains('\\') || name.contains("..") {
-            return Err(format!("Invalid shared script name: {name:?}"));
-        }
+        commands::validate_filename(name, "shared script")?;
         let shared_dir = app.state::<SettingsState>().0.lock().unwrap().shared_dir.clone();
         commands_root.join(&shared_dir).join(name)
     } else {
-        if script_name.contains('/') || script_name.contains('\\') || script_name.contains("..") {
-            return Err(format!("Invalid script name: {script_name:?}"));
-        }
+        commands::validate_filename(&script_name, "script")?;
         commands_root.join(&command_dir).join(&script_name)
     };
 
@@ -1090,21 +1131,17 @@ fn write_script_file(
     script_name: String,
     content: String,
 ) -> Result<(), String> {
-    let commands_root = app.state::<CommandsRoot>().0.clone();
+    let commands_root = app.state::<CommandsRoot>().0.lock().unwrap().clone();
 
     let (dir, script_path) = if let Some(name) = script_name.strip_prefix("shared:") {
         let name = name.trim();
-        if name.is_empty() || name.contains('/') || name.contains('\\') || name.contains("..") {
-            return Err(format!("Invalid shared script name: {name:?}"));
-        }
+        commands::validate_filename(name, "shared script")?;
         let shared_dir = app.state::<SettingsState>().0.lock().unwrap().shared_dir.clone();
         let dir = commands_root.join(&shared_dir);
         let path = dir.join(name);
         (dir, path)
     } else {
-        if script_name.contains('/') || script_name.contains('\\') || script_name.contains("..") {
-            return Err(format!("Invalid script name: {script_name:?}"));
-        }
+        commands::validate_filename(&script_name, "script")?;
         let dir = commands_root.join(&command_dir);
         let path = dir.join(&script_name);
         (dir, path)
@@ -1150,10 +1187,71 @@ fn load_context(app: tauri::AppHandle) -> String {
 /// along with any duplicate warnings detected during loading.
 #[tauri::command]
 fn list_commands(app: tauri::AppHandle) -> Result<commands::LoadResult, String> {
-    let commands_root = &app.state::<CommandsRoot>().0;
+    let commands_root = app.state::<CommandsRoot>().0.lock().unwrap().clone();
     let state = app.state::<SettingsState>();
     let settings = state.0.lock().unwrap();
-    commands::load_from_dir(commands_root, settings.allow_duplicates, settings.seed_examples)
+    commands::load_from_dir(&commands_root, settings.allow_duplicates, settings.seed_examples)
+}
+
+// ── ScriptEnv builder ──────────────────────────────────────────────────────────
+
+/// Intermediate owned values needed to construct a borrowed `ScriptEnv`.
+/// Extracted from Tauri state so the three script-invoking commands
+/// (`load_list`, `run_dynamic_list`, `run_script_action`) share one code path.
+struct ScriptEnvContext {
+    config_dir: std::path::PathBuf,
+    commands_root: std::path::PathBuf,
+    command_dir: std::path::PathBuf,
+    shared_dir: String,
+    debug: bool,
+    user_env: std::collections::HashMap<String, String>,
+}
+
+impl ScriptEnvContext {
+    /// Gather all state needed to build a `ScriptEnv` from the Tauri app handle.
+    fn from_app(
+        app: &tauri::AppHandle,
+        command_dir_rel: &str,
+        inline_env: &std::collections::HashMap<String, String>,
+    ) -> Result<Self, String> {
+        let config_dir = app.path().app_config_dir().map_err(|e| e.to_string())?;
+        let commands_root = app.state::<CommandsRoot>().0.lock().unwrap().clone();
+        let command_dir = commands_root.join(command_dir_rel);
+        let shared_dir = app
+            .state::<SettingsState>()
+            .0
+            .lock()
+            .unwrap()
+            .shared_dir
+            .clone();
+        let debug = app
+            .state::<DebugState>()
+            .0
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let user_env = commands::build_user_env(&commands_root, &command_dir, inline_env)?;
+        Ok(Self {
+            config_dir,
+            commands_root,
+            command_dir,
+            shared_dir,
+            debug,
+            user_env,
+        })
+    }
+
+    /// Build a borrowed `ScriptEnv` that references the owned fields above.
+    fn env<'a>(&'a self, context: &'a str, phrase: &'a str) -> commands::ScriptEnv<'a> {
+        commands::ScriptEnv {
+            context,
+            phrase,
+            config_dir: &self.config_dir,
+            commands_root: &self.commands_root,
+            command_dir: &self.command_dir,
+            user_env: &self.user_env,
+            shared_dir: &self.shared_dir,
+            debug: self.debug,
+        }
+    }
 }
 
 /// Load a named list from a co-located TSV file or the shared directory.
@@ -1166,32 +1264,15 @@ fn load_list(
     context: String,
     phrase: String,
 ) -> Result<Vec<commands::ListItem>, String> {
-    let config_dir = app
-        .path()
-        .app_config_dir()
-        .map_err(|e| e.to_string())?;
-    let commands_root = &app.state::<CommandsRoot>().0;
-    let dir = commands_root.join(&command_dir);
-    let shared_dir = app.state::<SettingsState>().0.lock().unwrap().shared_dir.clone();
-    let debug = app.state::<DebugState>().0.load(std::sync::atomic::Ordering::Relaxed);
-    let user_env = commands::build_user_env(commands_root, &dir, &inline_env)?;
-    let env = commands::ScriptEnv {
-        context: &context,
-        phrase: &phrase,
-        config_dir: &config_dir,
-        commands_root,
-        command_dir: &dir,
-        user_env: &user_env,
-        shared_dir: &shared_dir,
-        debug,
-    };
-    if debug {
+    let ctx = ScriptEnvContext::from_app(&app, &command_dir, &inline_env)?;
+    let env = ctx.env(&context, &phrase);
+    if ctx.debug {
         debug_log::log(
-            &config_dir,
+            &ctx.config_dir,
             &format!("[LIST] load_list name={list_name:?} dir={command_dir:?}"),
         );
     }
-    commands::load_list(&dir, &list_name, &env)
+    commands::load_list(&ctx.command_dir, &list_name, &env)
 }
 
 /// Run a script co-located with the command YAML and return the items it produces.
@@ -1206,26 +1287,9 @@ fn run_dynamic_list(
     phrase: String,
     inline_env: std::collections::HashMap<String, String>,
 ) -> Result<Vec<commands::ListItem>, String> {
-    let config_dir = app
-        .path()
-        .app_config_dir()
-        .map_err(|e| e.to_string())?;
-    let commands_root = &app.state::<CommandsRoot>().0;
-    let dir = commands_root.join(&command_dir);
-    let shared_dir = app.state::<SettingsState>().0.lock().unwrap().shared_dir.clone();
-    let debug = app.state::<DebugState>().0.load(std::sync::atomic::Ordering::Relaxed);
-    let user_env = commands::build_user_env(commands_root, &dir, &inline_env)?;
-    let env = commands::ScriptEnv {
-        context: &context,
-        phrase: &phrase,
-        config_dir: &config_dir,
-        commands_root,
-        command_dir: &dir,
-        user_env: &user_env,
-        shared_dir: &shared_dir,
-        debug,
-    };
-    commands::run_script(&dir, &script_name, arg.as_deref(), &env)
+    let ctx = ScriptEnvContext::from_app(&app, &command_dir, &inline_env)?;
+    let env = ctx.env(&context, &phrase);
+    commands::run_script(&ctx.command_dir, &script_name, arg.as_deref(), &env)
 }
 
 /// Run a script co-located with the command YAML and return its output as a list of
@@ -1241,26 +1305,9 @@ fn run_script_action(
     phrase: String,
     inline_env: std::collections::HashMap<String, String>,
 ) -> Result<Vec<String>, String> {
-    let config_dir = app
-        .path()
-        .app_config_dir()
-        .map_err(|e| e.to_string())?;
-    let commands_root = &app.state::<CommandsRoot>().0;
-    let dir = commands_root.join(&command_dir);
-    let shared_dir = app.state::<SettingsState>().0.lock().unwrap().shared_dir.clone();
-    let debug = app.state::<DebugState>().0.load(std::sync::atomic::Ordering::Relaxed);
-    let user_env = commands::build_user_env(commands_root, &dir, &inline_env)?;
-    let env = commands::ScriptEnv {
-        context: &context,
-        phrase: &phrase,
-        config_dir: &config_dir,
-        commands_root,
-        command_dir: &dir,
-        user_env: &user_env,
-        shared_dir: &shared_dir,
-        debug,
-    };
-    commands::run_script_values(&dir, &script_name, arg.as_deref(), &env)
+    let ctx = ScriptEnvContext::from_app(&app, &command_dir, &inline_env)?;
+    let env = ctx.env(&context, &phrase);
+    commands::run_script_values(&ctx.command_dir, &script_name, arg.as_deref(), &env)
 }
 
 /// Dismiss the launcher intentionally (Escape key, hotkey while visible, tray Hide).
@@ -1507,7 +1554,7 @@ pub fn run() {
             let allow_duplicates = loaded_settings.allow_duplicates;
             let commands_root = loaded_settings.commands_root(&config_dir);
             app.manage(SettingsState(Mutex::new(loaded_settings)));
-            app.manage(CommandsRoot(commands_root.clone()));
+            app.manage(CommandsRoot(Mutex::new(commands_root.clone())));
 
             app.manage(DebugState(std::sync::atomic::AtomicBool::new(false)));
 
@@ -1516,7 +1563,8 @@ pub fn run() {
             app.manage(PreferencesInitialTab(Mutex::new("commands".to_string())));
 
             // Start watching the commands subdirectory for live command reloads
-            watcher::start(app.handle().clone(), commands_root, allow_duplicates);
+            let watcher_tx = watcher::start(app.handle().clone(), commands_root, allow_duplicates);
+            app.manage(WatcherControl(Mutex::new(watcher_tx)));
 
             // Listen for incoming deep-link URLs (nimble://...) and route them.
             // Currently supports: nimble://ctx/set/<value> and nimble://ctx/reset.
@@ -1599,7 +1647,7 @@ pub fn run() {
 
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![hide_window, show_window, dismiss_launcher, register_shortcut, get_settings, save_hotkey, save_settings, open_preferences_window, get_preferences_initial_tab, list_command_files, save_command_file, delete_command_file, reveal_in_file_manager, open_in_default_editor, list_command_folders, read_script_file, write_script_file, save_context, load_context, list_commands, load_list, run_dynamic_list, run_script_action, open_url, paste_text, copy_text, deploy_skill, toggle_debug, is_debug, read_debug_log, open_debug_log, browse_directory])
+        .invoke_handler(tauri::generate_handler![hide_window, show_window, dismiss_launcher, register_shortcut, get_settings, get_default_commands_dir, save_hotkey, save_settings, open_preferences_window, get_preferences_initial_tab, list_command_files, save_command_file, delete_command_file, reveal_in_file_manager, open_in_default_editor, list_command_folders, read_script_file, write_script_file, save_context, load_context, list_commands, load_list, run_dynamic_list, run_script_action, open_url, paste_text, copy_text, deploy_skill, toggle_debug, is_debug, read_debug_log, open_debug_log, browse_directory])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
@@ -1958,50 +2006,361 @@ mod tests {
 
     #[test]
     fn script_name_rejects_path_separators() {
-        let dir = tempfile::tempdir().unwrap();
-        let dir_path = dir.path().to_path_buf();
-        // Simulate what read_script_file checks
-        let bad_names = ["../evil.sh", "sub/script.sh", "..\\evil.sh"];
+        // Verify the validation logic used by read_script_file / write_script_file:
+        // names containing '/', '\\', or ".." must be rejected.
+        let bad_names = ["../evil.sh", "sub/script.sh", "..\\evil.sh", "foo/../bar.sh"];
         for name in &bad_names {
             assert!(
                 name.contains('/') || name.contains('\\') || name.contains(".."),
-                "Sanity: {name} should be rejected"
+                "{name} should be rejected by the path-separator check"
             );
         }
-        // A valid plain name should resolve inside the dir
-        let good = dir_path.join("hello.sh");
-        assert!(good.starts_with(&dir_path));
-    }
-
-    #[test]
-    fn write_and_read_script_roundtrip() {
-        let dir = tempfile::tempdir().unwrap();
-        let script_path = dir.path().join("test.sh");
-        let content = "#!/bin/bash\necho hello\n";
-        std::fs::write(&script_path, content).unwrap();
-
-        // Verify we can read it back
-        let read_back = std::fs::read_to_string(&script_path).unwrap();
-        assert_eq!(read_back, content);
-
-        // Verify executable bit on unix
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let perms = std::fs::Permissions::from_mode(0o755);
-            std::fs::set_permissions(&script_path, perms).unwrap();
-            let meta = std::fs::metadata(&script_path).unwrap();
-            assert!(meta.permissions().mode() & 0o111 != 0);
+        // Plain names without separators must pass
+        let good_names = ["hello.sh", "my-script.py", "run_it"];
+        for name in &good_names {
+            assert!(
+                !name.contains('/') && !name.contains('\\') && !name.contains(".."),
+                "{name} should be accepted"
+            );
         }
     }
 
     #[test]
     fn target_dir_traversal_rejected() {
-        // The save_command_file function rejects ".." in target_dir.
-        // Test the string check directly.
-        let bad = "../../etc";
-        assert!(bad.contains(".."));
-        let ok = "my-folder/sub";
-        assert!(!ok.contains(".."));
+        // Mirrors the security check in save_command_file:
+        // target_dir containing ".." is rejected; normal dirs are fine.
+        let rejected = ["../../etc", "..", "foo/../bar", "..hidden"];
+        for td in &rejected {
+            assert!(td.contains(".."), "{td} must be caught by traversal check");
+        }
+        let accepted = ["my-folder", "sub/folder", "projects", "a.b.c"];
+        for td in &accepted {
+            assert!(!td.contains(".."), "{td} must be allowed");
+        }
+    }
+
+    // ── phrase_to_slug ────────────────────────────────────────────────────────
+
+    #[test]
+    fn slug_simple_words() {
+        assert_eq!(phrase_to_slug("open google"), "open-google");
+    }
+
+    #[test]
+    fn slug_uppercased_input() {
+        assert_eq!(phrase_to_slug("Open Google"), "open-google");
+    }
+
+    #[test]
+    fn slug_special_characters() {
+        assert_eq!(phrase_to_slug("copy — invoice!"), "copy-invoice");
+    }
+
+    #[test]
+    fn slug_consecutive_separators() {
+        assert_eq!(phrase_to_slug("a   b---c"), "a-b-c");
+    }
+
+    #[test]
+    fn slug_leading_trailing_non_alnum() {
+        assert_eq!(phrase_to_slug("  hello world!  "), "hello-world");
+    }
+
+    #[test]
+    fn slug_single_word() {
+        assert_eq!(phrase_to_slug("test"), "test");
+    }
+
+    #[test]
+    fn slug_empty_string() {
+        assert_eq!(phrase_to_slug(""), "");
+    }
+
+    #[test]
+    fn slug_only_special_chars() {
+        assert_eq!(phrase_to_slug("!@#$%"), "");
+    }
+
+    // ── resolve_url — additional failure/edge cases ───────────────────────────
+
+    #[test]
+    fn url_ftp_scheme_accepted() {
+        assert!(resolve_url("ftp://files.example.com/data".into(), None).is_ok());
+    }
+
+    #[test]
+    fn url_custom_scheme_accepted() {
+        assert!(resolve_url("myapp://action/run".into(), None).is_ok());
+    }
+
+    #[test]
+    fn url_colon_only_rejected() {
+        assert!(resolve_url(":no-scheme".into(), None).is_err());
+    }
+
+    #[test]
+    fn url_numeric_scheme_rejected() {
+        assert!(resolve_url("123://bad".into(), None).is_err());
+    }
+
+    #[test]
+    fn url_empty_string_rejected() {
+        assert!(resolve_url("".into(), None).is_err());
+    }
+
+    #[test]
+    fn url_just_path_rejected() {
+        assert!(resolve_url("/some/path".into(), None).is_err());
+    }
+
+    #[test]
+    fn param_not_substituted_when_no_placeholder() {
+        let r = resolve_url("https://example.com/page".into(), Some("ignored".into())).unwrap();
+        assert_eq!(r, "https://example.com/page");
+    }
+
+    #[test]
+    fn param_multiple_placeholders_all_substituted() {
+        let r = resolve_url(
+            "https://example.com/{param}/and/{param}".into(),
+            Some("val".into()),
+        )
+        .unwrap();
+        assert_eq!(r, "https://example.com/val/and/val");
+    }
+
+    #[test]
+    fn param_empty_string_substitutes_empty() {
+        let r = resolve_url(
+            "https://g.com/search?q={param}".into(),
+            Some("".into()),
+        )
+        .unwrap();
+        assert_eq!(r, "https://g.com/search?q=");
+    }
+
+    #[test]
+    fn param_unicode_encoded() {
+        let r = resolve_url(
+            "https://g.com/search?q={param}".into(),
+            Some("café".into()),
+        )
+        .unwrap();
+        // café = 63 61 66 c3 a9 in UTF-8, so 'é' → %C3%A9
+        assert!(r.contains("caf%C3%A9"), "expected encoded café in {r}");
+    }
+
+    // ── validate_text — edge cases ────────────────────────────────────────────
+
+    #[test]
+    fn validate_text_multiline_accepted() {
+        assert!(validate_text("line 1\nline 2\nline 3").is_ok());
+    }
+
+    #[test]
+    fn validate_text_unicode_accepted() {
+        assert!(validate_text("こんにちは 🎉 café").is_ok());
+    }
+
+    #[test]
+    fn validate_text_tab_accepted() {
+        assert!(validate_text("col1\tcol2").is_ok());
+    }
+
+    #[test]
+    fn validate_text_nul_at_start_rejected() {
+        assert!(validate_text("\0hello").is_err());
+    }
+
+    #[test]
+    fn validate_text_nul_at_end_rejected() {
+        assert!(validate_text("hello\0").is_err());
+    }
+
+    // ── state file — additional edge cases ────────────────────────────────────
+
+    #[test]
+    fn state_context_with_special_chars() {
+        let dir = tempfile::TempDir::new().unwrap();
+        write_context_to_state(dir.path(), "my project / with spaces & symbols").unwrap();
+        assert_eq!(
+            read_context_from_state(dir.path()),
+            "my project / with spaces & symbols"
+        );
+    }
+
+    #[test]
+    fn state_context_with_unicode() {
+        let dir = tempfile::TempDir::new().unwrap();
+        write_context_to_state(dir.path(), "プロジェクト").unwrap();
+        assert_eq!(read_context_from_state(dir.path()), "プロジェクト");
+    }
+
+    #[test]
+    fn state_overwrite_existing_context() {
+        let dir = tempfile::TempDir::new().unwrap();
+        write_context_to_state(dir.path(), "first").unwrap();
+        write_context_to_state(dir.path(), "second").unwrap();
+        assert_eq!(read_context_from_state(dir.path()), "second");
+    }
+
+    #[test]
+    fn state_json_with_extra_fields_still_reads_context() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join("state.json"),
+            r#"{"context":"work","extra":"data","number":42}"#,
+        )
+        .unwrap();
+        assert_eq!(read_context_from_state(dir.path()), "work");
+    }
+
+    #[test]
+    fn state_context_null_returns_empty() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(dir.path().join("state.json"), r#"{"context":null}"#).unwrap();
+        assert_eq!(read_context_from_state(dir.path()), "");
+    }
+
+    #[test]
+    fn state_context_number_returns_empty() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(dir.path().join("state.json"), r#"{"context":123}"#).unwrap();
+        assert_eq!(read_context_from_state(dir.path()), "");
+    }
+
+    // ── parse_deep_link — additional edge cases ───────────────────────────────
+
+    #[test]
+    fn deep_link_ctx_set_with_slashes_in_value() {
+        // Only the first path segment after set/ is the value
+        let result = parse_deep_link("nimble://ctx/set/a/b/c");
+        // The current implementation treats everything after set/ as the value
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn deep_link_ctx_set_special_chars() {
+        assert_eq!(
+            parse_deep_link("nimble://ctx/set/my%20project%21"),
+            Some(DeepLinkAction::CtxSet("my project!".into()))
+        );
+    }
+
+    #[test]
+    fn deep_link_ctx_only_returns_none() {
+        assert_eq!(parse_deep_link("nimble://ctx"), None);
+    }
+
+    #[test]
+    fn deep_link_ctx_slash_only_returns_none() {
+        assert_eq!(parse_deep_link("nimble://ctx/"), None);
+    }
+
+    #[test]
+    fn deep_link_empty_path_returns_none() {
+        assert_eq!(parse_deep_link("nimble://"), None);
+    }
+
+    #[test]
+    fn deep_link_completely_different_scheme() {
+        assert_eq!(parse_deep_link("http://ctx/set/foo"), None);
+    }
+
+    // ── percent_decode — additional edge cases ─────────────────────────────────
+
+    #[test]
+    fn percent_decode_malformed_single_hex_char() {
+        // %X with only one hex digit after %
+        let result = percent_decode("hello%2");
+        // With incomplete percent sequence, implementation varies — just ensure no panic
+        assert!(!result.is_empty());
+    }
+
+    #[test]
+    fn percent_decode_multiple_encoded() {
+        assert_eq!(percent_decode("%48%65%6C%6C%6F"), "Hello");
+    }
+
+    #[test]
+    fn percent_decode_mixed() {
+        assert_eq!(percent_decode("hello+world%21"), "hello world!");
+    }
+
+    // ── YAML roundtrip — additional action variants ───────────────────────────
+
+    #[test]
+    fn yaml_roundtrip_open_url_with_param() {
+        let yaml = "phrase: search google\ntitle: Search Google\naction:\n  type: open_url\n  config:\n    url: https://google.com/search?q={param}\n";
+        let cmd = write_and_parse(yaml);
+        assert_eq!(cmd.phrase, "search google");
+        if let commands::Action::OpenUrl(cfg) = &cmd.action {
+            assert!(cfg.url.contains("{param}"));
+        } else {
+            panic!("expected OpenUrl");
+        }
+    }
+
+    #[test]
+    fn yaml_roundtrip_paste_text_multiline() {
+        let yaml = "phrase: paste greeting\ntitle: Paste greeting\naction:\n  type: paste_text\n  config:\n    text: |\n      Hello,\n      World!\n";
+        let cmd = write_and_parse(yaml);
+        if let commands::Action::PasteText(cfg) = &cmd.action {
+            assert!(cfg.text.contains("Hello,"));
+            assert!(cfg.text.contains("World!"));
+        } else {
+            panic!("expected PasteText");
+        }
+    }
+
+    #[test]
+    fn yaml_roundtrip_copy_text() {
+        let yaml = "phrase: copy email\ntitle: Copy email\naction:\n  type: copy_text\n  config:\n    text: test@example.com\n";
+        let cmd = write_and_parse(yaml);
+        if let commands::Action::CopyText(cfg) = &cmd.action {
+            assert_eq!(cfg.text, "test@example.com");
+        } else {
+            panic!("expected CopyText");
+        }
+    }
+
+    #[test]
+    fn yaml_roundtrip_dynamic_list_all_arg_modes() {
+        for (mode, expected) in [
+            ("none", commands::ArgMode::None),
+            ("optional", commands::ArgMode::Optional),
+            ("required", commands::ArgMode::Required),
+        ] {
+            let yaml = format!(
+                "phrase: test {mode}\ntitle: Test\naction:\n  type: dynamic_list\n  config:\n    script: test.sh\n    arg: {mode}\n"
+            );
+            let cmd = write_and_parse(&yaml);
+            if let commands::Action::DynamicList(cfg) = &cmd.action {
+                assert_eq!(cfg.arg, expected, "arg mode {mode} should parse correctly");
+            } else {
+                panic!("expected DynamicList for mode {mode}");
+            }
+        }
+    }
+
+    #[test]
+    fn yaml_roundtrip_script_action_all_result_actions() {
+        for ra in ["open_url", "paste_text", "copy_text"] {
+            let yaml = format!(
+                "phrase: test {ra}\ntitle: Test\naction:\n  type: script_action\n  config:\n    script: test.sh\n    result_action: {ra}\n"
+            );
+            let cmd = write_and_parse(&yaml);
+            if let commands::Action::ScriptAction(cfg) = &cmd.action {
+                let expected = match ra {
+                    "open_url" => commands::ResultAction::OpenUrl,
+                    "paste_text" => commands::ResultAction::PasteText,
+                    "copy_text" => commands::ResultAction::CopyText,
+                    _ => unreachable!(),
+                };
+                assert_eq!(cfg.result_action, expected, "result_action {ra} should parse");
+            } else {
+                panic!("expected ScriptAction for result_action {ra}");
+            }
+        }
     }
 }

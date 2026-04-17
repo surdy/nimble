@@ -99,4 +99,6 @@ When an item is selected, Nimble uses the item's **`subtext`** as the value for 
 | Select an item | Performs `item_action`, or dismisses if absent |
 | Script times out (> 5 s) | Empty list shown; no error surfaced to user |
 
+> **Note:** Scripts that take longer than 5 seconds are terminated and produce an empty list. Keep scripts fast — ideally under 1 second. See [Writing Scripts](../guides/writing-scripts.md) for performance tips and debugging advice.
+
 For how to write scripts and advanced examples see [Writing Scripts](../guides/writing-scripts.md).

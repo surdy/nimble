@@ -32,3 +32,11 @@ action:
 ## macOS Accessibility permission
 
 Nimble uses macOS Accessibility APIs to simulate the paste keystroke. The first time you run a `paste_text` command, macOS will prompt you to grant Accessibility access in **System Settings → Privacy & Security → Accessibility**. Without this permission the keystroke simulation is blocked and the text will not be pasted.
+
+Linux and Windows do not require this permission.
+
+---
+
+## See also
+
+- [Copy Text](copy-text.md) — copies to the clipboard without simulating a keystroke

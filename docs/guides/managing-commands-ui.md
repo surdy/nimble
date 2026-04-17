@@ -29,7 +29,7 @@ Click any command in the list to view and edit it in the detail panel.
 
 1. Click the **＋** button in the sidebar header.
 2. Fill in the required fields:
-   - **Phrase** — The multi-word phrase users type to trigger this command.
+   - **Phrase** — The phrase users type to trigger this command.
    - **Folder** — Choose an existing folder from the dropdown, click **New…** to create one, or leave it as **Root** to save at the top level of `commands/`.
    - **Title** — A human-readable description shown in search results.
    - **Action** — Select the action type and fill in its configuration.

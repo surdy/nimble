@@ -8,9 +8,23 @@ use crate::commands;
 /// The Tauri event name emitted to the frontend when commands are reloaded.
 pub const COMMANDS_RELOADED_EVENT: &str = "commands://reloaded";
 
+/// A command sent to the watcher thread to reconfigure it at runtime.
+pub enum WatcherCommand {
+    /// Switch to a (possibly new) commands directory and/or update the
+    /// `allow_duplicates` setting. The watcher unwatches the old directory,
+    /// watches the new one, reloads commands, and emits to the frontend.
+    Reconfigure {
+        commands_dir: PathBuf,
+        allow_duplicates: bool,
+    },
+}
+
 /// Start a background thread that watches `commands_dir` for file changes.
 /// On any relevant event the command list is reloaded and emitted to all
 /// windows as `commands://reloaded`.
+///
+/// Returns a `Sender` that can be used to reconfigure the watcher at runtime
+/// (e.g. when the user changes `commands_dir` in settings).
 ///
 /// `commands_dir` is `config_dir/commands/`. Scripts are co-located with
 /// their command YAML files inside this tree, so a single recursive watch
@@ -18,8 +32,17 @@ pub const COMMANDS_RELOADED_EVENT: &str = "commands://reloaded";
 ///
 /// The watcher runs for the lifetime of the app — Tauri will clean up the
 /// thread when the process exits.
-pub fn start(app: AppHandle, commands_dir: PathBuf, allow_duplicates: bool) {
+pub fn start(
+    app: AppHandle,
+    commands_dir: PathBuf,
+    allow_duplicates: bool,
+) -> mpsc::Sender<WatcherCommand> {
+    let (ctrl_tx, ctrl_rx) = mpsc::channel();
+
     thread::spawn(move || {
+        let mut current_dir = commands_dir;
+        let mut current_allow_dupes = allow_duplicates;
+
         // Channel for raw notify events
         let (tx, rx) = mpsc::channel();
 
@@ -38,25 +61,61 @@ pub fn start(app: AppHandle, commands_dir: PathBuf, allow_duplicates: bool) {
             }
         };
 
-        if let Err(e) = watcher.watch(&commands_dir, RecursiveMode::Recursive) {
+        if let Err(e) = watcher.watch(&current_dir, RecursiveMode::Recursive) {
             eprintln!("[nimble] could not watch commands dir: {e}");
             return;
         }
 
         eprintln!(
             "[nimble] watching for changes: {}",
-            commands_dir.display()
+            current_dir.display()
         );
 
         // Debounce: after a relevant event, wait this long before reloading
         // so that rapid saves / multiple renames don't trigger multiple loads.
         const DEBOUNCE: Duration = Duration::from_millis(300);
 
+        // How often to check the control channel when no file events arrive.
+        const POLL_INTERVAL: Duration = Duration::from_secs(1);
+
         loop {
-            // Block until first event
-            let event = match rx.recv() {
+            // Check for reconfigure commands from the main thread.
+            while let Ok(cmd) = ctrl_rx.try_recv() {
+                match cmd {
+                    WatcherCommand::Reconfigure {
+                        commands_dir: new_dir,
+                        allow_duplicates: new_dupes,
+                    } => {
+                        if new_dir != current_dir {
+                            watcher.unwatch(&current_dir).ok();
+                            if let Err(e) =
+                                watcher.watch(&new_dir, RecursiveMode::Recursive)
+                            {
+                                eprintln!(
+                                    "[nimble] could not watch new commands dir: {e}"
+                                );
+                            }
+                            eprintln!(
+                                "[nimble] watcher switched: {} → {}",
+                                current_dir.display(),
+                                new_dir.display()
+                            );
+                            current_dir = new_dir;
+                        }
+                        current_allow_dupes = new_dupes;
+
+                        // Reload immediately with the new configuration.
+                        emit_reload(&app, &current_dir, current_allow_dupes);
+                    }
+                }
+            }
+
+            // Wait for a file event, with a timeout so we periodically
+            // re-check the control channel above.
+            let event = match rx.recv_timeout(POLL_INTERVAL) {
                 Ok(e) => e,
-                Err(_) => break, // channel closed, app is exiting
+                Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
             };
 
             if !is_relevant_event(&event) {
@@ -73,18 +132,25 @@ pub fn start(app: AppHandle, commands_dir: PathBuf, allow_duplicates: bool) {
             }
 
             // Reload commands and emit to frontend
-            match commands::load_from_dir(&commands_dir, allow_duplicates, false) {
-                Ok(result) => {
-                    if let Err(e) = app.emit(COMMANDS_RELOADED_EVENT, &result) {
-                        eprintln!("[nimble] could not emit reload event: {e}");
-                    }
-                }
-                Err(e) => {
-                    eprintln!("[nimble] reload failed: {e}");
-                }
-            }
+            emit_reload(&app, &current_dir, current_allow_dupes);
         }
     });
+
+    ctrl_tx
+}
+
+/// Reload commands from `dir` and emit the result to the frontend.
+fn emit_reload(app: &AppHandle, dir: &PathBuf, allow_duplicates: bool) {
+    match commands::load_from_dir(dir, allow_duplicates, false) {
+        Ok(result) => {
+            if let Err(e) = app.emit(COMMANDS_RELOADED_EVENT, &result) {
+                eprintln!("[nimble] could not emit reload event: {e}");
+            }
+        }
+        Err(e) => {
+            eprintln!("[nimble] reload failed: {e}");
+        }
+    }
 }
 
 /// Returns true if the event is one we should react to:

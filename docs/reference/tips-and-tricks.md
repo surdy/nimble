@@ -72,7 +72,7 @@ The pattern is the same for any app that supports URL schemes: look up the app's
 
 ## Web search via Open URL + parameters
 
-Use `{param}` in the URL to turn any command into a search launcher. Whatever you type _after_ the command phrase becomes the search query, URL-encoded automatically.
+Use `{param}` in the URL to turn any command into a search launcher. Whatever you type _after_ the phrase becomes the search query, URL-encoded automatically.
 
 ### General search engines
 

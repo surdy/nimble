@@ -4,6 +4,7 @@
   import { getCurrentWindow, LogicalSize } from "@tauri-apps/api/window";
   import { listen, emit } from "@tauri-apps/api/event";
   import type { Action, AppSettings, Command, CommandFileMeta, CommandsPayload, DuplicateWarning, ListItem, ReservedPhraseWarning } from "$lib/types";
+  import { actionBadge, highlight, eventToShortcut, shortenPath, filterCommands, isParamMode, computeEffectiveInput } from "$lib/helpers";
 
   // ── State ──────────────────────────────────────────────────────────────
   let input = $state("");
@@ -60,6 +61,7 @@
   let settingsAllowDuplicates = $state(true);
   let settingsSharedDir = $state("shared");
   let settingsCommandsDir = $state("");
+  let defaultCommandsDir = $state("");
   let settingsChangingHotkey = $state(false);
   let settingsCapturedShortcut = $state("");
   let settingsHotkeyError = $state("");
@@ -264,21 +266,7 @@
   const MAX_RESULTS = 8;
   const ROW_H = 56; // px per result row
 
-  // Human-readable badge label for each action type
-  function actionBadge(cmd: { action: Action }): string {
-    const type = cmd.action.type;
-    if (type === "builtin" && cmd.action.config.action === "docs_open") return "Docs";
-    if (type === "builtin" && cmd.action.config.action === "deploy_skill") return "Deploy";
-    switch (type) {
-      case "open_url":       return "URL";
-      case "paste_text":     return "Paste";
-      case "copy_text":      return "Copy";
-      case "static_list":    return "List";
-      case "dynamic_list":   return "List";
-      case "script_action":  return "Script";
-      default:               return "";
-    }
-  }
+
 
   // When a context is active and the user is not typing a / command, append
   // the context to raw input so commands are matched against the full phrase.
@@ -286,63 +274,15 @@
   // command (i.e. the user typed the full phrase + extra text), do NOT append
   // context — the trailing text is a user-supplied parameter, not a phrase
   // fragment.  Scripts can still read the context via NIMBLE_CONTEXT env var.
-  const rawInParamMode = $derived(
-    (() => {
-      const raw = input.trim().toLowerCase();
-      if (raw === "" || raw.startsWith("/")) return false;
-      return commands.some(cmd => raw.startsWith(cmd.phrase.toLowerCase() + " "));
-    })()
-  );
+  const rawInParamMode = $derived(isParamMode(input, commands));
 
-  const effectiveInput = $derived(
-    activeContext && input.trim() !== "" && !input.trim().startsWith("/") && !rawInParamMode
-      ? input.trim() + " " + activeContext
-      : input.trim()
-  );
+  const effectiveInput = $derived(computeEffectiveInput(input, activeContext, commands));
 
-  const filtered = $derived(
-    effectiveInput === ""
-      ? []
-      : (() => {
-          const typed = effectiveInput.toLowerCase();
-          const matches = commands.filter(cmd => {
-            const phrase = cmd.phrase.toLowerCase();
-            // Standard partial/substring match (discovery while typing)
-            // OR param mode: user has typed the full phrase + space + param text
-            return phrase.includes(typed) || typed.startsWith(phrase + " ");
-          });
-          // Longest-phrase-wins: when multiple commands match in param mode,
-          // sort the longer phrase first so it is the default Enter target.
-          return matches.slice().sort((a, b) => {
-            const ap = a.phrase.toLowerCase();
-            const bp = b.phrase.toLowerCase();
-            const aParam = typed.startsWith(ap + " ");
-            const bParam = typed.startsWith(bp + " ");
-            if (aParam && bParam) return bp.length - ap.length;
-            return 0;
-          });
-        })()
-  );
+  const filtered = $derived(filterCommands(commands, effectiveInput));
 
   // Built-in / commands filtered by the current raw input (only when input starts with "/")
   const filteredBuiltins: Command[] = $derived(
-    input.trim().startsWith("/")
-      ? (() => {
-          const typed = input.trim().toLowerCase();
-          const matches = builtinCommands.filter(cmd => {
-            const phrase = cmd.phrase.toLowerCase();
-            return phrase.includes(typed) || typed.startsWith(phrase + " ");
-          });
-          return matches.slice().sort((a, b) => {
-            const ap = a.phrase.toLowerCase();
-            const bp = b.phrase.toLowerCase();
-            const aParam = typed.startsWith(ap + " ");
-            const bParam = typed.startsWith(bp + " ");
-            if (aParam && bParam) return bp.length - ap.length;
-            return 0;
-          });
-        })()
-      : []
+    input.trim().startsWith("/") ? filterCommands(builtinCommands, input.trim()) : []
   );
 
   // Combined results: built-ins first, then YAML commands
@@ -398,11 +338,18 @@
     }
 
     // ── dynamic_list: exact match OR phrase + space + suffix ───────────
-    const dynMatch = commands.find(cmd => {
-      if (cmd.action.type !== "dynamic_list") return false;
-      const phrase = cmd.phrase.toLowerCase();
-      return typed === phrase || typed.startsWith(phrase + " ");
-    }) ?? null;
+    // Prefer exact-phrase match over prefix match so that "channels internal"
+    // finds the longer command before the shorter "channels" prefix.
+    // Among prefix matches, prefer the longest phrase (most specific command).
+    const dynMatch = (
+      commands.find(cmd => cmd.action.type === "dynamic_list" && cmd.phrase.toLowerCase() === typed) ??
+      commands
+        .filter(cmd => {
+          if (cmd.action.type !== "dynamic_list") return false;
+          return typed.startsWith(cmd.phrase.toLowerCase() + " ");
+        })
+        .sort((a, b) => b.phrase.length - a.phrase.length)[0]
+    ) ?? null;
 
     if (dynMatch && dynMatch.action.type === "dynamic_list") {
       const phrase = dynMatch.phrase.toLowerCase();
@@ -410,6 +357,24 @@
       const isExact = typed === phrase;
       const suffix = typed.startsWith(phrase + " ") ? typed.slice(phrase.length + 1).trim() : "";
       const argMode = config.arg ?? "none";
+
+      // When the match is via prefix (not exact), check if the typed text
+      // also partially matches a longer command phrase that extends this one.
+      // If so, don't trigger the list — show both as normal filtered results
+      // so the user can choose between the shorter (param) and longer (phrase) command.
+      if (!isExact) {
+        const hasLongerPhraseMatch = commands.some(cmd => {
+          if (cmd === dynMatch) return false;
+          const p = cmd.phrase.toLowerCase();
+          return p.startsWith(phrase + " ") && p.includes(typed);
+        });
+        if (hasLongerPhraseMatch) {
+          activeListCmd = null;
+          listItems = [];
+          dynamicListLoaded = false;
+          return;
+        }
+      }
 
       let timer: ReturnType<typeof setTimeout> | null = null;
 
@@ -487,17 +452,7 @@
     }
   });
 
-  // ── Highlight helper ──────────────────────────────────────────────────
-  function highlight(phrase: string, query: string) {
-    const q = query.trim().toLowerCase();
-    const idx = phrase.toLowerCase().indexOf(q);
-    if (idx === -1 || q === "") return { before: phrase, match: "", after: "" };
-    return {
-      before: phrase.slice(0, idx),
-      match:  phrase.slice(idx, idx + q.length),
-      after:  phrase.slice(idx + q.length),
-    };
-  }
+
 
   const LAUNCHER_SIZE  = new LogicalSize(640, 64);
   const ONBOARDING_SIZE = new LogicalSize(480, 240);
@@ -824,6 +779,13 @@ echo "Hello, world!"
     }
   }
 
+  function clearCommandsDir() {
+    settingsCommandsDir = "";
+    persistSettings();
+  }
+
+
+
   async function persistSettings() {
     const dir = settingsCommandsDir.trim() || undefined;
     try {
@@ -877,23 +839,7 @@ echo "Hello, world!"
     }
   }
 
-  // Build a Tauri-compatible accelerator string from a KeyboardEvent
-  function eventToShortcut(e: KeyboardEvent): string | null {
-    const mods: string[] = [];
-    if (e.metaKey)  mods.push("Super");
-    if (e.ctrlKey)  mods.push("Control");
-    if (e.altKey)   mods.push("Alt");
-    if (e.shiftKey) mods.push("Shift");
-    if (mods.length === 0) return null;
-    const ignored = new Set(["Meta", "Control", "Alt", "Shift"]);
-    if (ignored.has(e.key)) return null;
-    const keyMap: Record<string, string> = {
-      " ": "Space", "\u00a0": "Space", "ArrowUp": "Up", "ArrowDown": "Down",
-      "ArrowLeft": "Left", "ArrowRight": "Right",
-    };
-    const key = keyMap[e.key] ?? (e.key.length === 1 ? e.key.toUpperCase() : e.key);
-    return [...mods, key].join("+");
-  }
+
 
   // ── Onboarding key capture ─────────────────────────────────────────────
   function handleOnboardingKeydown(e: KeyboardEvent) {
@@ -1149,6 +1095,22 @@ echo "Hello, world!"
         const cmd = allFiltered[selectedIndex];
         if (cmd) executeCommand(cmd);
       }
+    } else if (e.key === "Tab") {
+      e.preventDefault();
+      // Tab autocompletes to the longest partially-matched phrase.
+      // Only considers commands whose phrase starts with what the user typed
+      // but isn't fully typed yet (i.e. partial phrase matches, not param mode).
+      const typed = effectiveInput.toLowerCase();
+      if (typed === "") return;
+      const candidates = allFiltered
+        .filter(cmd => {
+          const phrase = cmd.phrase.toLowerCase();
+          return phrase.startsWith(typed) && phrase !== typed;
+        })
+        .sort((a, b) => b.phrase.length - a.phrase.length);
+      if (candidates.length > 0) {
+        input = candidates[0].phrase;
+      }
     }
   }
 
@@ -1181,6 +1143,7 @@ echo "Hello, world!"
         settingsAllowDuplicates = appSettings.allow_duplicates;
         settingsSharedDir = appSettings.shared_dir ?? "shared";
         settingsCommandsDir = appSettings.commands_dir ?? "";
+        defaultCommandsDir = await invoke<string>("get_default_commands_dir").catch(() => "");
         await cmdRefreshList();
         // Read the initial tab from managed state (avoids URL hash / PathBuf issues).
         const initialTab = await invoke<string>("get_preferences_initial_tab").catch(() => "commands");
@@ -1845,19 +1808,20 @@ echo "Hello, world!"
       <div class="settings-row settings-row-stacked">
         <div class="settings-row-info">
           <span class="row-title">Commands directory</span>
-          <span class="row-desc">Custom absolute path (leave blank for default). Restart required.</span>
+          <span class="row-desc">Custom absolute path. Changes apply immediately.</span>
         </div>
         <div class="settings-dir-row">
-          <input
-            class="settings-text-input settings-dir-input"
-            type="text"
-            bind:value={settingsCommandsDir}
-            placeholder="Default"
-            onblur={persistSettings}
-            spellcheck="false"
-            autocomplete="off"
-            autocorrect="off"
-          />
+          {#if settingsCommandsDir.trim()}
+            <div class="settings-dir-display" title={settingsCommandsDir}>
+              <span class="dir-path">{shortenPath(settingsCommandsDir, defaultCommandsDir)}</span>
+            </div>
+            <button class="settings-dir-clear-btn" onclick={clearCommandsDir} title="Reset to default">✕</button>
+          {:else}
+            <div class="settings-dir-display settings-dir-default" title={defaultCommandsDir}>
+              <span class="dir-path">{defaultCommandsDir ? shortenPath(defaultCommandsDir, defaultCommandsDir) : "Default"}</span>
+              <span class="dir-default-badge">default</span>
+            </div>
+          {/if}
           <button class="settings-browse-btn" onclick={browseCommandsDir}>Browse…</button>
         </div>
       </div>
@@ -2609,9 +2573,66 @@ echo "Hello, world!"
     align-items: center;
   }
 
-  .settings-dir-input {
+  .settings-dir-display {
     flex: 1;
     min-width: 0;
+    background: rgba(255,255,255,.04);
+    border: 1px solid rgba(255,255,255,.08);
+    border-radius: 7px;
+    padding: 7px 10px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    cursor: default;
+  }
+
+  .settings-dir-display .dir-path {
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-size: 12px;
+    color: #f5f5f7;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    min-width: 0;
+  }
+
+  .settings-dir-default .dir-path {
+    color: rgba(245,245,247,.45);
+  }
+
+  .dir-default-badge {
+    flex-shrink: 0;
+    font-size: 10px;
+    font-weight: 500;
+    color: rgba(245,245,247,.35);
+    background: rgba(255,255,255,.06);
+    border-radius: 4px;
+    padding: 1px 6px;
+    text-transform: uppercase;
+    letter-spacing: .04em;
+  }
+
+  .settings-dir-clear-btn {
+    flex-shrink: 0;
+    width: 26px;
+    height: 26px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(255,255,255,.06);
+    border: 1px solid rgba(255,255,255,.1);
+    border-radius: 6px;
+    color: rgba(245,245,247,.5);
+    font-size: 12px;
+    cursor: pointer;
+    transition: background .15s, color .15s;
+    padding: 0;
+  }
+
+  .settings-dir-clear-btn:hover {
+    background: rgba(255,80,80,.15);
+    color: #ff6b6b;
+    border-color: rgba(255,80,80,.25);
   }
 
   .settings-browse-btn {
