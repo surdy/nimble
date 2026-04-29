@@ -11,11 +11,13 @@ pub const COMMANDS_RELOADED_EVENT: &str = "commands://reloaded";
 /// A command sent to the watcher thread to reconfigure it at runtime.
 pub enum WatcherCommand {
     /// Switch to a (possibly new) commands directory and/or update the
-    /// `allow_duplicates` setting. The watcher unwatches the old directory,
-    /// watches the new one, reloads commands, and emits to the frontend.
+    /// `allow_duplicates` or `shared_dir` settings. The watcher unwatches
+    /// the old directory, watches the new one, reloads commands, and emits
+    /// to the frontend.
     Reconfigure {
         commands_dir: PathBuf,
         allow_duplicates: bool,
+        shared_dir: String,
     },
 }
 
@@ -36,12 +38,14 @@ pub fn start(
     app: AppHandle,
     commands_dir: PathBuf,
     allow_duplicates: bool,
+    shared_dir: String,
 ) -> mpsc::Sender<WatcherCommand> {
     let (ctrl_tx, ctrl_rx) = mpsc::channel();
 
     thread::spawn(move || {
         let mut current_dir = commands_dir;
         let mut current_allow_dupes = allow_duplicates;
+        let mut current_shared_dir = shared_dir;
 
         // Channel for raw notify events
         let (tx, rx) = mpsc::channel();
@@ -85,6 +89,7 @@ pub fn start(
                     WatcherCommand::Reconfigure {
                         commands_dir: new_dir,
                         allow_duplicates: new_dupes,
+                        shared_dir: new_shared,
                     } => {
                         if new_dir != current_dir {
                             watcher.unwatch(&current_dir).ok();
@@ -103,9 +108,10 @@ pub fn start(
                             current_dir = new_dir;
                         }
                         current_allow_dupes = new_dupes;
+                        current_shared_dir = new_shared;
 
                         // Reload immediately with the new configuration.
-                        emit_reload(&app, &current_dir, current_allow_dupes);
+                        emit_reload(&app, &current_dir, current_allow_dupes, &current_shared_dir);
                     }
                 }
             }
@@ -132,7 +138,7 @@ pub fn start(
             }
 
             // Reload commands and emit to frontend
-            emit_reload(&app, &current_dir, current_allow_dupes);
+            emit_reload(&app, &current_dir, current_allow_dupes, &current_shared_dir);
         }
     });
 
@@ -140,8 +146,8 @@ pub fn start(
 }
 
 /// Reload commands from `dir` and emit the result to the frontend.
-fn emit_reload(app: &AppHandle, dir: &PathBuf, allow_duplicates: bool) {
-    match commands::load_from_dir(dir, allow_duplicates, false) {
+fn emit_reload(app: &AppHandle, dir: &PathBuf, allow_duplicates: bool, shared_dir: &str) {
+    match commands::load_from_dir(dir, allow_duplicates, false, shared_dir) {
         Ok(result) => {
             if let Err(e) = app.emit(COMMANDS_RELOADED_EVENT, &result) {
                 eprintln!("[nimble] could not emit reload event: {e}");

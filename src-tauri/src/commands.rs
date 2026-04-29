@@ -21,16 +21,19 @@ const STDOUT_SNIPPET_LEN: usize = 500;
 // ── Schema ─────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct OpenUrlConfig {
     pub url: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PasteTextConfig {
     pub text: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CopyTextConfig {
     pub text: String,
 }
@@ -46,6 +49,7 @@ pub enum ItemAction {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct StaticListConfig {
     /// Name of the list file (without extension) co-located with the command YAML.
     pub list: String,
@@ -68,6 +72,7 @@ fn default_arg_mode() -> ArgMode {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DynamicListConfig {
     /// Name of the script file (without path) inside `config_dir/scripts/`.
     pub script: String,
@@ -89,6 +94,7 @@ pub enum ResultAction {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ScriptActionConfig {
     /// Name of the script file (without path) inside `config_dir/scripts/`.
     pub script: String,
@@ -124,6 +130,7 @@ pub struct ListItem {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Command {
     pub phrase: String,
     pub title: String,
@@ -173,6 +180,27 @@ pub struct ReservedPhraseWarning {
     pub file: String,
 }
 
+/// A warning produced when a YAML command file could not be read or parsed
+/// and was therefore skipped during loading.
+#[derive(Debug, Clone, Serialize)]
+pub struct SkippedFileWarning {
+    /// Config-dir-relative path of the file that was skipped.
+    pub file: String,
+    /// Human-readable reason (e.g. a serde error with line/column info).
+    pub reason: String,
+}
+
+/// A warning produced during load-time validation of a successfully-parsed
+/// command (e.g. pre-flight script existence, non-executable script,
+/// or invalid inline env key).
+#[derive(Debug, Clone, Serialize)]
+pub struct CommandWarning {
+    /// Config-dir-relative path of the file whose command triggered the warning.
+    pub file: String,
+    /// Human-readable warning message.
+    pub message: String,
+}
+
 /// The result of loading commands from the config directory.
 #[derive(Debug, Clone, Serialize)]
 pub struct LoadResult {
@@ -180,6 +208,10 @@ pub struct LoadResult {
     pub duplicates: Vec<DuplicateWarning>,
     /// Commands rejected because their phrase starts with the reserved `/` sigil.
     pub reserved: Vec<ReservedPhraseWarning>,
+    /// YAML files that could not be read or parsed (skipped entirely).
+    pub skipped: Vec<SkippedFileWarning>,
+    /// Load-time validation warnings for successfully-parsed commands.
+    pub warnings: Vec<CommandWarning>,
 }
 
 // ── Seed files written on first launch ────────────────────────────────────────
@@ -697,8 +729,8 @@ fn spawn_script(
 
     let elapsed = start.elapsed();
 
+    let stderr_text = String::from_utf8_lossy(&output.stderr);
     if !output.stderr.is_empty() {
-        let stderr_text = String::from_utf8_lossy(&output.stderr);
         eprintln!("[nimble] script {script_ref:?} stderr: {stderr_text}");
         if env.debug {
             let snippet: String = stderr_text.chars().take(STDERR_SNIPPET_LEN).collect();
@@ -724,9 +756,109 @@ fn spawn_script(
         );
     }
 
+    // Treat any non-zero exit code as an error.  The first non-blank line of
+    // stderr is included in the message so the user sees the root cause
+    // immediately without needing to open the debug log.
+    if !output.status.success() {
+        let code = output.status.code().unwrap_or(-1);
+        let first_line = stderr_text
+            .lines()
+            .find(|l| !l.trim().is_empty())
+            .unwrap_or("");
+        let msg = if first_line.is_empty() {
+            format!("Script exited with code {code}")
+        } else {
+            let truncated: String = first_line.chars().take(200).collect();
+            format!("exit {code}: {truncated}")
+        };
+        if env.debug {
+            debug_log::log(env.config_dir, &format!("[SCRIPT] ERROR non-zero exit={code}"));
+        }
+        return Err(msg);
+    }
+
     Ok(ScriptOutput {
         stdout,
     })
+}
+
+/// Raw result of a test-run invocation (used by the preferences "Test" button).
+#[derive(Debug, Clone, Serialize)]
+pub struct ScriptTestResult {
+    pub stdout: String,
+    pub stderr: String,
+    pub exit_code: Option<i32>,
+    pub duration_ms: u64,
+    pub timed_out: bool,
+}
+
+/// Like `spawn_script`, but never treats a non-zero exit code as an error —
+/// returns all raw output regardless of exit status. Used by the preferences
+/// "Test" button so the user can see exactly what the script produced.
+pub fn spawn_script_raw(
+    command_dir: &Path,
+    script_ref: &str,
+    arg: Option<&str>,
+    env: &ScriptEnv<'_>,
+) -> Result<ScriptTestResult, String> {
+    let script_path = resolve_script_path(script_ref, command_dir, env)?;
+    if !script_path.exists() {
+        return Err(format!("Script not found: {}", script_path.display()));
+    }
+
+    #[cfg(windows)]
+    let mut cmd = {
+        let ext = script_path.extension().and_then(|e| e.to_str()).unwrap_or("");
+        if ext.eq_ignore_ascii_case("ps1") {
+            let mut c = std::process::Command::new("powershell");
+            c.args(["-ExecutionPolicy", "Bypass", "-File", &script_path.to_string_lossy().into_owned()]);
+            c
+        } else {
+            std::process::Command::new(&script_path)
+        }
+    };
+    #[cfg(not(windows))]
+    let mut cmd = std::process::Command::new(&script_path);
+    if let Some(a) = arg {
+        cmd.arg(a);
+    }
+    inject_env(&mut cmd, env);
+    cmd.stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+
+    let child = cmd
+        .spawn()
+        .map_err(|e| format!("Could not spawn {:?}: {e}", script_path.display()))?;
+
+    let start = std::time::Instant::now();
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(child.wait_with_output());
+    });
+
+    match rx.recv_timeout(Duration::from_secs(SCRIPT_TIMEOUT_SECS)) {
+        Ok(Ok(output)) => {
+            let duration_ms = start.elapsed().as_millis() as u64;
+            Ok(ScriptTestResult {
+                stdout: String::from_utf8_lossy(&output.stdout).trim().to_string(),
+                stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+                exit_code: output.status.code(),
+                duration_ms,
+                timed_out: false,
+            })
+        }
+        Ok(Err(e)) => Err(format!("Script error: {e}")),
+        Err(_) => {
+            let duration_ms = start.elapsed().as_millis() as u64;
+            Ok(ScriptTestResult {
+                stdout: String::new(),
+                stderr: format!("Script timed out after {SCRIPT_TIMEOUT_SECS} seconds"),
+                exit_code: None,
+                duration_ms,
+                timed_out: true,
+            })
+        }
+    }
 }
 
 /// Run the script identified by `script_ref`, optionally passing `arg` as a
@@ -758,6 +890,18 @@ pub fn run_script(
             );
         }
         return Ok(items);
+    }
+    if env.debug {
+        let lines = result.stdout.lines().count();
+        let msg = if lines > 1 {
+            format!(
+                "[SCRIPT] WARN: output was not valid JSON, treated as plain text (single item). \
+                 Output has {lines} lines but returned as 1 item — did you mean to output JSON?"
+            )
+        } else {
+            "[SCRIPT] WARN: output was not valid JSON, treated as plain text (single item)".to_string()
+        };
+        debug_log::log(env.config_dir, &msg);
     }
     Ok(vec![ListItem {
         title: result.stdout,
@@ -798,6 +942,18 @@ pub fn run_script_values(
         }
         return Ok(values);
     }
+    if env.debug {
+        let lines = result.stdout.lines().count();
+        let msg = if lines > 1 {
+            format!(
+                "[SCRIPT] WARN: output was not valid JSON, treated as plain text (single value). \
+                 Output has {lines} lines but returned as 1 value — did you mean to output JSON?"
+            )
+        } else {
+            "[SCRIPT] WARN: output was not valid JSON, treated as plain text (single value)".to_string()
+        };
+        debug_log::log(env.config_dir, &msg);
+    }
     Ok(vec![result.stdout])
 }
 
@@ -833,9 +989,13 @@ fn collect_yaml_files(config_dir: &Path) -> Vec<std::path::PathBuf> {
 /// `.yaml`/`.yml` file as a single `Command`, and return the collected list.
 /// Files are processed oldest-first (by mtime) so that the original command
 /// always wins when duplicates are present. Files that fail to parse are
-/// skipped (with an eprintln warning) so one malformed file does not prevent
-/// others from loading.
-pub fn load_from_dir(config_dir: &Path, allow_duplicates: bool, seed_examples: bool) -> Result<LoadResult, String> {
+/// skipped (recorded in `LoadResult::skipped`) so one malformed file does not
+/// prevent others from loading.
+///
+/// `shared_dir` is the name of the shared-scripts subdirectory (from settings,
+/// default `"shared"`). It is used for pre-flight script existence / executable
+/// checks on `dynamic_list` and `script_action` commands.
+pub fn load_from_dir(config_dir: &Path, allow_duplicates: bool, seed_examples: bool, shared_dir: &str) -> Result<LoadResult, String> {
     fs::create_dir_all(config_dir)
         .map_err(|e| format!("Could not create config directory: {e}"))?;
 
@@ -882,6 +1042,8 @@ pub fn load_from_dir(config_dir: &Path, allow_duplicates: bool, seed_examples: b
     let mut commands = Vec::new();
     let mut duplicates = Vec::new();
     let mut reserved: Vec<ReservedPhraseWarning> = Vec::new();
+    let mut skipped: Vec<SkippedFileWarning> = Vec::new();
+    let mut warnings: Vec<CommandWarning> = Vec::new();
     // Maps lowercase phrase → relative path of the file that claimed it.
     // Only used when allow_duplicates is false.
     let mut seen: HashMap<String, String> = HashMap::new();
@@ -895,9 +1057,21 @@ pub fn load_from_dir(config_dir: &Path, allow_duplicates: bool, seed_examples: b
             .to_string();
 
         match fs::read_to_string(&path) {
-            Err(e) => eprintln!("[nimble] could not read {}: {e}", path.display()),
+            Err(e) => {
+                eprintln!("[nimble] could not read {}: {e}", path.display());
+                skipped.push(SkippedFileWarning {
+                    file: display,
+                    reason: format!("Could not read file: {e}"),
+                });
+            }
             Ok(yaml) => match serde_yaml::from_str::<Command>(&yaml) {
-                Err(e) => eprintln!("[nimble] could not parse {}: {e}", path.display()),
+                Err(e) => {
+                    eprintln!("[nimble] could not parse {}: {e}", path.display());
+                    skipped.push(SkippedFileWarning {
+                        file: display,
+                        reason: format!("{e}"),
+                    });
+                }
                 Ok(cmd) if !cmd.enabled => {} // disabled — silently skip
                 Ok(cmd) => {
                     let key = cmd.phrase.to_lowercase();
@@ -924,7 +1098,7 @@ pub fn load_from_dir(config_dir: &Path, allow_duplicates: bool, seed_examples: b
                             });
                             continue;
                         }
-                        seen.insert(key, display);
+                        seen.insert(key, display.clone());
                     }
                     // Record the directory containing this command file, relative
                     // to the commands root, so the frontend can pass it back when
@@ -935,19 +1109,73 @@ pub fn load_from_dir(config_dir: &Path, allow_duplicates: bool, seed_examples: b
                         .map(|p| p.display().to_string())
                         .unwrap_or_default();
                     let mut cmd = cmd;
-                    cmd.source_dir = source_dir;
+                    cmd.source_dir = source_dir.clone();
                     cmd.source_file = path
                         .strip_prefix(config_dir)
                         .ok()
                         .map(|p| p.display().to_string())
                         .unwrap_or_default();
+
+                    // ── Load-time validation ──────────────────────────────
+
+                    // (a) Validate inline env keys.
+                    for key in cmd.env.keys() {
+                        if let Err(msg) = validate_env_key(key, "inline env") {
+                            warnings.push(CommandWarning {
+                                file: display.clone(),
+                                message: msg,
+                            });
+                        }
+                    }
+
+                    // (b) Pre-flight: check script exists and is executable for
+                    //     dynamic_list and script_action commands.
+                    let script_ref = match &cmd.action {
+                        Action::DynamicList(cfg) => Some(cfg.script.as_str()),
+                        Action::ScriptAction(cfg) => Some(cfg.script.as_str()),
+                        _ => None,
+                    };
+                    if let Some(script_ref) = script_ref {
+                        let command_dir = config_dir.join(&source_dir);
+                        let script_path = if let Some(name) = script_ref.strip_prefix("shared:") {
+                            config_dir.join(shared_dir).join(name.trim())
+                        } else {
+                            command_dir.join(script_ref)
+                        };
+                        if !script_path.exists() {
+                            warnings.push(CommandWarning {
+                                file: display.clone(),
+                                message: format!(
+                                    "Script not found: {}",
+                                    script_path.display()
+                                ),
+                            });
+                        } else {
+                            #[cfg(unix)]
+                            {
+                                use std::os::unix::fs::PermissionsExt;
+                                if let Ok(meta) = fs::metadata(&script_path) {
+                                    if meta.permissions().mode() & 0o111 == 0 {
+                                        warnings.push(CommandWarning {
+                                            file: display.clone(),
+                                            message: format!(
+                                                "Script is not executable (run: chmod +x {})",
+                                                script_path.display()
+                                            ),
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                    }
+
                     commands.push(cmd);
                 }
             },
         }
     }
 
-    Ok(LoadResult { commands, duplicates, reserved })
+    Ok(LoadResult { commands, duplicates, reserved, skipped, warnings })
 }
 
 #[cfg(test)]
@@ -974,7 +1202,7 @@ mod tests {
             "open-google.yaml",
             "phrase: open google\ntitle: Open Google\naction:\n  type: open_url\n  config:\n    url: https://www.google.com\n",
         );
-        let result = load_from_dir(dir.path(), true, false).unwrap();
+        let result = load_from_dir(dir.path(), true, false, "shared").unwrap();
         assert_eq!(result.commands.len(), 1);
         assert_eq!(result.commands[0].phrase, "open google");
         assert!(matches!(result.commands[0].action, Action::OpenUrl(_)));
@@ -988,7 +1216,7 @@ mod tests {
             "paste.yaml",
             "phrase: paste email\ntitle: Paste email\naction:\n  type: paste_text\n  config:\n    text: hello@example.com\n",
         );
-        let result = load_from_dir(dir.path(), true, false).unwrap();
+        let result = load_from_dir(dir.path(), true, false, "shared").unwrap();
         assert_eq!(result.commands.len(), 1);
         assert!(matches!(result.commands[0].action, Action::PasteText(_)));
     }
@@ -1001,7 +1229,7 @@ mod tests {
             "copy.yaml",
             "phrase: copy email\ntitle: Copy email\naction:\n  type: copy_text\n  config:\n    text: hello@example.com\n",
         );
-        let result = load_from_dir(dir.path(), true, false).unwrap();
+        let result = load_from_dir(dir.path(), true, false, "shared").unwrap();
         assert_eq!(result.commands.len(), 1);
         assert!(matches!(result.commands[0].action, Action::CopyText(_)));
     }
@@ -1025,7 +1253,7 @@ mod tests {
             "b.yaml",
             "phrase: open google\ntitle: Second\naction:\n  type: open_url\n  config:\n    url: https://duckduckgo.com\n",
         );
-        let result = load_from_dir(dir.path(), false, false).unwrap();
+        let result = load_from_dir(dir.path(), false, false, "shared").unwrap();
         assert_eq!(result.commands.len(), 1, "only one command should survive");
         assert_eq!(result.duplicates.len(), 1, "one duplicate warning expected");
         assert_eq!(result.duplicates[0].phrase, "open google");
@@ -1041,7 +1269,7 @@ mod tests {
             "disabled.yaml",
             "phrase: hidden cmd\ntitle: Hidden\nenabled: false\naction:\n  type: open_url\n  config:\n    url: https://example.com\n",
         );
-        let result = load_from_dir(dir.path(), true, false).unwrap();
+        let result = load_from_dir(dir.path(), true, false, "shared").unwrap();
         assert!(result.commands.is_empty(), "disabled command must be filtered out");
     }
 
@@ -1057,8 +1285,151 @@ mod tests {
             "good.yaml",
             "phrase: open google\ntitle: Open Google\naction:\n  type: open_url\n  config:\n    url: https://www.google.com\n",
         );
-        let result = load_from_dir(dir.path(), true, false).unwrap();
+        let result = load_from_dir(dir.path(), true, false, "shared").unwrap();
         assert_eq!(result.commands.len(), 1, "only the valid command should load");
+        assert_eq!(result.skipped.len(), 1, "malformed file should appear in skipped");
+        assert!(result.skipped[0].file.contains("bad.yaml"));
+        assert!(!result.skipped[0].reason.is_empty());
+    }
+
+    #[test]
+    fn typo_field_name_goes_to_skipped() {
+        // `phrases:` is a common misspelling of `phrase:` — with deny_unknown_fields
+        // this is now a parse error that shows up in skipped, not silently ignored.
+        let dir = TempDir::new().unwrap();
+        write_yaml(
+            &dir,
+            "typo.yaml",
+            "phrases: open google\ntitle: Open Google\naction:\n  type: open_url\n  config:\n    url: https://www.google.com\n",
+        );
+        let result = load_from_dir(dir.path(), true, false, "shared").unwrap();
+        assert_eq!(result.commands.len(), 0, "typo'd command must not silently load");
+        assert_eq!(result.skipped.len(), 1, "typo'd file should appear in skipped");
+        assert!(result.skipped[0].file.contains("typo.yaml"));
+        // The error should mention the unknown field
+        assert!(
+            result.skipped[0].reason.contains("phrases") || result.skipped[0].reason.contains("unknown field"),
+            "error should name the offending field: {}",
+            result.skipped[0].reason
+        );
+    }
+
+    #[test]
+    fn typo_in_config_struct_goes_to_skipped() {
+        // `urls:` instead of `url:` inside the open_url config block.
+        let dir = TempDir::new().unwrap();
+        write_yaml(
+            &dir,
+            "badconfig.yaml",
+            "phrase: open google\ntitle: Open Google\naction:\n  type: open_url\n  config:\n    urls: https://www.google.com\n",
+        );
+        let result = load_from_dir(dir.path(), true, false, "shared").unwrap();
+        assert_eq!(result.commands.len(), 0, "bad config field must not silently load");
+        assert_eq!(result.skipped.len(), 1);
+        assert!(result.skipped[0].file.contains("badconfig.yaml"));
+    }
+
+    #[test]
+    fn skipped_includes_unreadable_file_reason() {
+        // Write a valid file plus a malformed one; verify skipped contains the
+        // malformed file with a non-empty reason string.
+        let dir = TempDir::new().unwrap();
+        write_yaml(&dir, "broken.yaml", "phrase: [unclosed bracket\n");
+        let result = load_from_dir(dir.path(), true, false, "shared").unwrap();
+        assert_eq!(result.commands.len(), 0);
+        assert_eq!(result.skipped.len(), 1);
+        assert!(result.skipped[0].file.contains("broken.yaml"));
+        // The serde YAML error should be non-trivial (contains line/column info)
+        assert!(result.skipped[0].reason.len() > 5);
+    }
+
+    // ── Preflight script checks ───────────────────────────────────────────────
+
+    #[test]
+    fn missing_script_produces_command_warning() {
+        let dir = TempDir::new().unwrap();
+        write_yaml(
+            &dir,
+            "dl.yaml",
+            "phrase: list items\ntitle: List items\naction:\n  type: dynamic_list\n  config:\n    script: does-not-exist.sh\n",
+        );
+        let result = load_from_dir(dir.path(), true, false, "shared").unwrap();
+        assert_eq!(result.commands.len(), 1, "command still loads despite missing script");
+        assert_eq!(result.warnings.len(), 1, "one warning for missing script");
+        assert!(result.warnings[0].message.contains("not found") || result.warnings[0].message.contains("Script not found"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_executable_script_produces_command_warning() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = TempDir::new().unwrap();
+        write_yaml(
+            &dir,
+            "dl.yaml",
+            "phrase: list items\ntitle: List items\naction:\n  type: dynamic_list\n  config:\n    script: myscript.sh\n",
+        );
+        // Create the script file but make it non-executable
+        let script = dir.path().join("myscript.sh");
+        fs::write(&script, "#!/bin/bash\necho '[]'\n").unwrap();
+        let mut perms = fs::metadata(&script).unwrap().permissions();
+        perms.set_mode(0o644); // readable but not executable
+        fs::set_permissions(&script, perms).unwrap();
+
+        let result = load_from_dir(dir.path(), true, false, "shared").unwrap();
+        assert_eq!(result.commands.len(), 1);
+        assert_eq!(result.warnings.len(), 1, "one warning for non-executable script");
+        assert!(result.warnings[0].message.contains("not executable") || result.warnings[0].message.contains("chmod"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn executable_script_produces_no_warning() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = TempDir::new().unwrap();
+        write_yaml(
+            &dir,
+            "dl.yaml",
+            "phrase: list items\ntitle: List items\naction:\n  type: dynamic_list\n  config:\n    script: myscript.sh\n",
+        );
+        let script = dir.path().join("myscript.sh");
+        fs::write(&script, "#!/bin/bash\necho '[]'\n").unwrap();
+        let mut perms = fs::metadata(&script).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&script, perms).unwrap();
+
+        let result = load_from_dir(dir.path(), true, false, "shared").unwrap();
+        assert_eq!(result.commands.len(), 1);
+        assert_eq!(result.warnings.len(), 0, "no warning for an executable script");
+    }
+
+    // ── Env key validation at load time ───────────────────────────────────────
+
+    #[test]
+    fn invalid_env_key_produces_command_warning() {
+        let dir = TempDir::new().unwrap();
+        write_yaml(
+            &dir,
+            "cmd.yaml",
+            "phrase: my cmd\ntitle: My cmd\nenv:\n  NIMBLE_FORBIDDEN: value\naction:\n  type: paste_text\n  config:\n    text: hello\n",
+        );
+        let result = load_from_dir(dir.path(), true, false, "shared").unwrap();
+        assert_eq!(result.commands.len(), 1, "command still loads despite bad env key");
+        assert_eq!(result.warnings.len(), 1, "one warning for forbidden env key");
+        assert!(result.warnings[0].message.contains("NIMBLE_") || result.warnings[0].message.contains("reserved"));
+    }
+
+    #[test]
+    fn valid_env_keys_produce_no_warnings() {
+        let dir = TempDir::new().unwrap();
+        write_yaml(
+            &dir,
+            "cmd.yaml",
+            "phrase: my cmd\ntitle: My cmd\nenv:\n  MY_API_KEY: value\n  another_key: other\naction:\n  type: paste_text\n  config:\n    text: hello\n",
+        );
+        let result = load_from_dir(dir.path(), true, false, "shared").unwrap();
+        assert_eq!(result.commands.len(), 1);
+        assert_eq!(result.warnings.len(), 0, "no warnings for valid env keys");
     }
 
     #[test]
@@ -1069,7 +1440,7 @@ mod tests {
             "sub/show.yaml",
             "phrase: team emails\ntitle: Team emails\naction:\n  type: static_list\n  config:\n    list: team-emails\n",
         );
-        let result = load_from_dir(dir.path(), true, false).unwrap();
+        let result = load_from_dir(dir.path(), true, false, "shared").unwrap();
         assert_eq!(result.commands.len(), 1);
         if let Action::StaticList(cfg) = &result.commands[0].action {
             assert_eq!(cfg.list, "team-emails");
@@ -1090,7 +1461,7 @@ mod tests {
             "open.yaml",
             "phrase: open google\ntitle: Open Google\naction:\n  type: open_url\n  config:\n    url: https://www.google.com\n",
         );
-        let result = load_from_dir(dir.path(), true, false).unwrap();
+        let result = load_from_dir(dir.path(), true, false, "shared").unwrap();
         assert_eq!(result.commands[0].source_dir, "");
         assert_eq!(result.commands[0].source_file, "open.yaml");
     }
@@ -1104,7 +1475,7 @@ mod tests {
             "phrase: open\ntitle: Open\naction:\n  type: open_url\n  config:\n    url: https://example.com\n",
         );
         fs::write(dir.path().join("env.yaml"), "MY_VAR: hello\n").unwrap();
-        let result = load_from_dir(dir.path(), true, false).unwrap();
+        let result = load_from_dir(dir.path(), true, false, "shared").unwrap();
         assert_eq!(result.commands.len(), 1);
     }
 
@@ -1117,7 +1488,7 @@ mod tests {
             "phrase: open\ntitle: Open\naction:\n  type: open_url\n  config:\n    url: https://example.com\n",
         );
         fs::write(dir.path().join("env.yml"), "MY_VAR: hello\n").unwrap();
-        let result = load_from_dir(dir.path(), true, false).unwrap();
+        let result = load_from_dir(dir.path(), true, false, "shared").unwrap();
         assert_eq!(result.commands.len(), 1);
     }
 
@@ -1131,7 +1502,7 @@ mod tests {
         );
         fs::create_dir_all(dir.path().join("sub")).unwrap();
         fs::write(dir.path().join("sub/env.yaml"), "KEY: val\n").unwrap();
-        let result = load_from_dir(dir.path(), true, false).unwrap();
+        let result = load_from_dir(dir.path(), true, false, "shared").unwrap();
         assert_eq!(result.commands.len(), 1);
     }
 
@@ -1143,7 +1514,7 @@ mod tests {
             "my-env.yaml",
             "phrase: my env\ntitle: My Env\naction:\n  type: open_url\n  config:\n    url: https://example.com\n",
         );
-        let result = load_from_dir(dir.path(), true, false).unwrap();
+        let result = load_from_dir(dir.path(), true, false, "shared").unwrap();
         assert_eq!(result.commands.len(), 1);
     }
 
@@ -1155,7 +1526,7 @@ mod tests {
             "show.yaml",
             "phrase: pick snippet\ntitle: Snippets\naction:\n  type: static_list\n  config:\n    list: snippets\n    item_action: paste_text\n",
         );
-        let result = load_from_dir(dir.path(), true, false).unwrap();
+        let result = load_from_dir(dir.path(), true, false, "shared").unwrap();
         if let Action::StaticList(cfg) = &result.commands[0].action {
             assert_eq!(cfg.item_action, Some(ItemAction::PasteText));
         } else {
@@ -1246,7 +1617,7 @@ mod tests {
             "dyn.yaml",
             "phrase: hello script\ntitle: Hello\naction:\n  type: dynamic_list\n  config:\n    script: hello.sh\n    arg: none\n",
         );
-        let result = load_from_dir(dir.path(), true, false).unwrap();
+        let result = load_from_dir(dir.path(), true, false, "shared").unwrap();
         assert_eq!(result.commands.len(), 1);
         if let Action::DynamicList(cfg) = &result.commands[0].action {
             assert_eq!(cfg.script, "hello.sh");
@@ -1265,7 +1636,7 @@ mod tests {
             "dyn.yaml",
             "phrase: hello script\ntitle: Hello\naction:\n  type: dynamic_list\n  config:\n    script: hello.sh\n",
         );
-        let result = load_from_dir(dir.path(), true, false).unwrap();
+        let result = load_from_dir(dir.path(), true, false, "shared").unwrap();
         if let Action::DynamicList(cfg) = &result.commands[0].action {
             assert_eq!(cfg.arg, ArgMode::None, "arg should default to none");
         } else {
@@ -1281,7 +1652,7 @@ mod tests {
             "dyn.yaml",
             "phrase: search things\ntitle: Search\naction:\n  type: dynamic_list\n  config:\n    script: search.sh\n    arg: required\n    item_action: paste_text\n",
         );
-        let result = load_from_dir(dir.path(), true, false).unwrap();
+        let result = load_from_dir(dir.path(), true, false, "shared").unwrap();
         if let Action::DynamicList(cfg) = &result.commands[0].action {
             assert_eq!(cfg.arg, ArgMode::Required);
             assert_eq!(cfg.item_action, Some(ItemAction::PasteText));
@@ -1448,7 +1819,7 @@ mod tests {
             "sa.yaml",
             "phrase: paste ts\ntitle: Paste timestamp\naction:\n  type: script_action\n  config:\n    script: ts.sh\n    result_action: paste_text\n",
         );
-        let result = load_from_dir(dir.path(), true, false).unwrap();
+        let result = load_from_dir(dir.path(), true, false, "shared").unwrap();
         assert_eq!(result.commands.len(), 1);
         if let Action::ScriptAction(cfg) = &result.commands[0].action {
             assert_eq!(cfg.script, "ts.sh");
@@ -1469,7 +1840,7 @@ mod tests {
             "sa.yaml",
             "phrase: open urls\ntitle: Open URLs\naction:\n  type: script_action\n  config:\n    script: urls.sh\n    arg: required\n    result_action: open_url\n",
         );
-        let result = load_from_dir(dir.path(), true, false).unwrap();
+        let result = load_from_dir(dir.path(), true, false, "shared").unwrap();
         if let Action::ScriptAction(cfg) = &result.commands[0].action {
             assert_eq!(cfg.arg, ArgMode::Required);
             assert_eq!(cfg.result_action, ResultAction::OpenUrl);
@@ -1486,7 +1857,7 @@ mod tests {
             "sa.yaml",
             "phrase: copy emails\ntitle: Copy emails\naction:\n  type: script_action\n  config:\n    script: emails.sh\n    result_action: copy_text\n    prefix: \"To: \"\n    suffix: \"\\n\"\n",
         );
-        let result = load_from_dir(dir.path(), true, false).unwrap();
+        let result = load_from_dir(dir.path(), true, false, "shared").unwrap();
         if let Action::ScriptAction(cfg) = &result.commands[0].action {
             assert_eq!(cfg.result_action, ResultAction::CopyText);
             assert_eq!(cfg.prefix.as_deref(), Some("To: "));
@@ -1506,7 +1877,7 @@ mod tests {
             "slash.yaml",
             "phrase: /ctx set foo\ntitle: Bad\naction:\n  type: open_url\n  config:\n    url: https://example.com\n",
         );
-        let result = load_from_dir(dir.path(), true, false).unwrap();
+        let result = load_from_dir(dir.path(), true, false, "shared").unwrap();
         assert!(result.commands.is_empty(), "/phrase must not load as a command");
         assert_eq!(result.reserved.len(), 1);
         assert_eq!(result.reserved[0].phrase, "/ctx set foo");
@@ -1520,7 +1891,7 @@ mod tests {
             "slash2.yaml",
             "phrase: /ctx reset\ntitle: Bad\naction:\n  type: open_url\n  config:\n    url: https://example.com\n",
         );
-        let result = load_from_dir(dir.path(), true, false).unwrap();
+        let result = load_from_dir(dir.path(), true, false, "shared").unwrap();
         assert!(result.commands.is_empty());
         assert_eq!(result.reserved.len(), 1);
         assert_eq!(result.reserved[0].phrase, "/ctx reset");
@@ -1534,7 +1905,7 @@ mod tests {
             "no-slash.yaml",
             "phrase: open github/issues\ntitle: Not reserved\naction:\n  type: open_url\n  config:\n    url: https://github.com\n",
         );
-        let result = load_from_dir(dir.path(), true, false).unwrap();
+        let result = load_from_dir(dir.path(), true, false, "shared").unwrap();
         assert_eq!(result.commands.len(), 1, "slash not at start is not reserved");
         assert!(result.reserved.is_empty());
     }
@@ -1547,7 +1918,7 @@ mod tests {
             "open-google.yaml",
             "phrase: open google\ntitle: Open Google\naction:\n  type: open_url\n  config:\n    url: https://www.google.com\n",
         );
-        let result = load_from_dir(dir.path(), true, false).unwrap();
+        let result = load_from_dir(dir.path(), true, false, "shared").unwrap();
         assert_eq!(result.commands.len(), 1, "normal phrase is not reserved");
         assert!(result.reserved.is_empty());
     }
@@ -1560,7 +1931,7 @@ mod tests {
             "good.yaml",
             "phrase: open google\ntitle: Open Google\naction:\n  type: open_url\n  config:\n    url: https://www.google.com\n",
         );
-        let result = load_from_dir(dir.path(), true, false).unwrap();
+        let result = load_from_dir(dir.path(), true, false, "shared").unwrap();
         assert!(result.reserved.is_empty());
     }
 
@@ -1579,7 +1950,7 @@ mod tests {
             "b.yaml",
             "phrase: open google\ntitle: Second\naction:\n  type: open_url\n  config:\n    url: https://duckduckgo.com\n",
         );
-        let result = load_from_dir(dir.path(), true, false).unwrap();
+        let result = load_from_dir(dir.path(), true, false, "shared").unwrap();
         assert_eq!(result.commands.len(), 2, "both commands should load when allow_duplicates=true");
         assert!(result.duplicates.is_empty(), "no warnings when allow_duplicates=true");
     }
@@ -2094,7 +2465,7 @@ mod tests {
             "my-cmd.yaml",
             "phrase: test cmd\ntitle: Test\nenv:\n  MY_VAR: hello\n  OTHER: world\naction:\n  type: paste_text\n  config:\n    text: hi\n",
         );
-        let result = load_from_dir(dir.path(), true, false).unwrap();
+        let result = load_from_dir(dir.path(), true, false, "shared").unwrap();
         assert_eq!(result.commands.len(), 1);
         assert_eq!(result.commands[0].env.get("MY_VAR").unwrap(), "hello");
         assert_eq!(result.commands[0].env.get("OTHER").unwrap(), "world");
@@ -2108,7 +2479,7 @@ mod tests {
             "my-cmd.yaml",
             "phrase: test cmd\ntitle: Test\naction:\n  type: paste_text\n  config:\n    text: hi\n",
         );
-        let result = load_from_dir(dir.path(), true, false).unwrap();
+        let result = load_from_dir(dir.path(), true, false, "shared").unwrap();
         assert_eq!(result.commands.len(), 1);
         assert!(result.commands[0].env.is_empty());
     }
@@ -2252,7 +2623,7 @@ mod tests {
             "show.yaml",
             "phrase: pick item\ntitle: Items\naction:\n  type: static_list\n  config:\n    list: items\n    item_action: copy_text\n",
         );
-        let result = load_from_dir(dir.path(), true, false).unwrap();
+        let result = load_from_dir(dir.path(), true, false, "shared").unwrap();
         if let Action::StaticList(cfg) = &result.commands[0].action {
             assert_eq!(cfg.item_action, Some(ItemAction::CopyText));
         } else {
@@ -2268,7 +2639,7 @@ mod tests {
             "show.yaml",
             "phrase: open bookmark\ntitle: Bookmarks\naction:\n  type: static_list\n  config:\n    list: bookmarks\n    item_action: open_url\n",
         );
-        let result = load_from_dir(dir.path(), true, false).unwrap();
+        let result = load_from_dir(dir.path(), true, false, "shared").unwrap();
         if let Action::StaticList(cfg) = &result.commands[0].action {
             assert_eq!(cfg.item_action, Some(ItemAction::OpenUrl));
         } else {
@@ -2284,7 +2655,7 @@ mod tests {
             "dyn.yaml",
             "phrase: search items\ntitle: Search\naction:\n  type: dynamic_list\n  config:\n    script: search.sh\n    arg: optional\n    item_action: copy_text\n",
         );
-        let result = load_from_dir(dir.path(), true, false).unwrap();
+        let result = load_from_dir(dir.path(), true, false, "shared").unwrap();
         if let Action::DynamicList(cfg) = &result.commands[0].action {
             assert_eq!(cfg.arg, ArgMode::Optional);
             assert_eq!(cfg.item_action, Some(ItemAction::CopyText));
@@ -2301,7 +2672,7 @@ mod tests {
             "dyn.yaml",
             "phrase: search urls\ntitle: URLs\naction:\n  type: dynamic_list\n  config:\n    script: urls.sh\n    arg: optional\n    item_action: open_url\n",
         );
-        let result = load_from_dir(dir.path(), true, false).unwrap();
+        let result = load_from_dir(dir.path(), true, false, "shared").unwrap();
         if let Action::DynamicList(cfg) = &result.commands[0].action {
             assert_eq!(cfg.arg, ArgMode::Optional);
             assert_eq!(cfg.item_action, Some(ItemAction::OpenUrl));
@@ -2318,7 +2689,7 @@ mod tests {
             "dyn.yaml",
             "phrase: list snippets\ntitle: Snippets\naction:\n  type: dynamic_list\n  config:\n    script: snippets.sh\n    arg: none\n    item_action: paste_text\n",
         );
-        let result = load_from_dir(dir.path(), true, false).unwrap();
+        let result = load_from_dir(dir.path(), true, false, "shared").unwrap();
         if let Action::DynamicList(cfg) = &result.commands[0].action {
             assert_eq!(cfg.arg, ArgMode::None);
             assert_eq!(cfg.item_action, Some(ItemAction::PasteText));
@@ -2335,7 +2706,7 @@ mod tests {
             "dyn.yaml",
             "phrase: find stuff\ntitle: Finder\naction:\n  type: dynamic_list\n  config:\n    script: find.sh\n    arg: required\n",
         );
-        let result = load_from_dir(dir.path(), true, false).unwrap();
+        let result = load_from_dir(dir.path(), true, false, "shared").unwrap();
         if let Action::DynamicList(cfg) = &result.commands[0].action {
             assert_eq!(cfg.arg, ArgMode::Required);
             assert!(cfg.item_action.is_none());
@@ -2352,7 +2723,7 @@ mod tests {
             "sa.yaml",
             "phrase: copy uuids\ntitle: Copy UUIDs\naction:\n  type: script_action\n  config:\n    script: uuid.sh\n    arg: optional\n    result_action: copy_text\n",
         );
-        let result = load_from_dir(dir.path(), true, false).unwrap();
+        let result = load_from_dir(dir.path(), true, false, "shared").unwrap();
         if let Action::ScriptAction(cfg) = &result.commands[0].action {
             assert_eq!(cfg.arg, ArgMode::Optional);
             assert_eq!(cfg.result_action, ResultAction::CopyText);
@@ -2371,7 +2742,7 @@ mod tests {
             "sa.yaml",
             "phrase: open morning sites\ntitle: Morning sites\naction:\n  type: script_action\n  config:\n    script: morning.sh\n    arg: none\n    result_action: open_url\n",
         );
-        let result = load_from_dir(dir.path(), true, false).unwrap();
+        let result = load_from_dir(dir.path(), true, false, "shared").unwrap();
         if let Action::ScriptAction(cfg) = &result.commands[0].action {
             assert_eq!(cfg.arg, ArgMode::None);
             assert_eq!(cfg.result_action, ResultAction::OpenUrl);
@@ -2388,7 +2759,7 @@ mod tests {
             "sa.yaml",
             "phrase: paste items\ntitle: Paste items\naction:\n  type: script_action\n  config:\n    script: items.sh\n    arg: required\n    result_action: paste_text\n    prefix: \"- \"\n    suffix: \"\\n\"\n",
         );
-        let result = load_from_dir(dir.path(), true, false).unwrap();
+        let result = load_from_dir(dir.path(), true, false, "shared").unwrap();
         if let Action::ScriptAction(cfg) = &result.commands[0].action {
             assert_eq!(cfg.arg, ArgMode::Required);
             assert_eq!(cfg.result_action, ResultAction::PasteText);
@@ -2409,7 +2780,7 @@ mod tests {
             "bad.yaml",
             "title: No Phrase\naction:\n  type: open_url\n  config:\n    url: https://example.com\n",
         );
-        let result = load_from_dir(dir.path(), true, false).unwrap();
+        let result = load_from_dir(dir.path(), true, false, "shared").unwrap();
         assert!(result.commands.is_empty(), "command without phrase should be skipped");
     }
 
@@ -2421,7 +2792,7 @@ mod tests {
             "bad.yaml",
             "phrase: test\naction:\n  type: open_url\n  config:\n    url: https://example.com\n",
         );
-        let result = load_from_dir(dir.path(), true, false).unwrap();
+        let result = load_from_dir(dir.path(), true, false, "shared").unwrap();
         assert!(result.commands.is_empty(), "command without title should be skipped");
     }
 
@@ -2433,7 +2804,7 @@ mod tests {
             "bad.yaml",
             "phrase: test\ntitle: Test\n",
         );
-        let result = load_from_dir(dir.path(), true, false).unwrap();
+        let result = load_from_dir(dir.path(), true, false, "shared").unwrap();
         assert!(result.commands.is_empty(), "command without action should be skipped");
     }
 
@@ -2445,7 +2816,7 @@ mod tests {
             "bad.yaml",
             "phrase: test\ntitle: Test\naction:\n  type: launch_app\n  config:\n    name: Chrome\n",
         );
-        let result = load_from_dir(dir.path(), true, false).unwrap();
+        let result = load_from_dir(dir.path(), true, false, "shared").unwrap();
         assert!(result.commands.is_empty(), "unknown action type should be skipped");
     }
 
@@ -2457,7 +2828,7 @@ mod tests {
             "bad.yaml",
             "phrase: test\ntitle: Test\naction:\n  type: dynamic_list\n  config:\n    script: test.sh\n    arg: always\n",
         );
-        let result = load_from_dir(dir.path(), true, false).unwrap();
+        let result = load_from_dir(dir.path(), true, false, "shared").unwrap();
         assert!(result.commands.is_empty(), "invalid arg mode should cause parse to fail");
     }
 
@@ -2469,7 +2840,7 @@ mod tests {
             "bad.yaml",
             "phrase: test\ntitle: Test\naction:\n  type: static_list\n  config:\n    list: items\n    item_action: run_script\n",
         );
-        let result = load_from_dir(dir.path(), true, false).unwrap();
+        let result = load_from_dir(dir.path(), true, false, "shared").unwrap();
         assert!(result.commands.is_empty(), "invalid item_action should cause parse to fail");
     }
 
@@ -2481,7 +2852,7 @@ mod tests {
             "bad.yaml",
             "phrase: test\ntitle: Test\naction:\n  type: script_action\n  config:\n    script: test.sh\n    result_action: execute\n",
         );
-        let result = load_from_dir(dir.path(), true, false).unwrap();
+        let result = load_from_dir(dir.path(), true, false, "shared").unwrap();
         assert!(result.commands.is_empty(), "invalid result_action should cause parse to fail");
     }
 
@@ -2493,7 +2864,7 @@ mod tests {
             "bad.yaml",
             "phrase: test\ntitle: Test\naction:\n  type: open_url\n  config: {}\n",
         );
-        let result = load_from_dir(dir.path(), true, false).unwrap();
+        let result = load_from_dir(dir.path(), true, false, "shared").unwrap();
         assert!(result.commands.is_empty(), "open_url without url should fail to parse");
     }
 
@@ -2505,7 +2876,7 @@ mod tests {
             "bad.yaml",
             "phrase: test\ntitle: Test\naction:\n  type: paste_text\n  config: {}\n",
         );
-        let result = load_from_dir(dir.path(), true, false).unwrap();
+        let result = load_from_dir(dir.path(), true, false, "shared").unwrap();
         assert!(result.commands.is_empty(), "paste_text without text should fail to parse");
     }
 
@@ -2517,7 +2888,7 @@ mod tests {
             "bad.yaml",
             "phrase: test\ntitle: Test\naction:\n  type: copy_text\n  config: {}\n",
         );
-        let result = load_from_dir(dir.path(), true, false).unwrap();
+        let result = load_from_dir(dir.path(), true, false, "shared").unwrap();
         assert!(result.commands.is_empty(), "copy_text without text should fail to parse");
     }
 
@@ -2529,7 +2900,7 @@ mod tests {
             "bad.yaml",
             "phrase: test\ntitle: Test\naction:\n  type: static_list\n  config: {}\n",
         );
-        let result = load_from_dir(dir.path(), true, false).unwrap();
+        let result = load_from_dir(dir.path(), true, false, "shared").unwrap();
         assert!(result.commands.is_empty(), "static_list without list should fail to parse");
     }
 
@@ -2541,7 +2912,7 @@ mod tests {
             "bad.yaml",
             "phrase: test\ntitle: Test\naction:\n  type: dynamic_list\n  config: {}\n",
         );
-        let result = load_from_dir(dir.path(), true, false).unwrap();
+        let result = load_from_dir(dir.path(), true, false, "shared").unwrap();
         assert!(result.commands.is_empty(), "dynamic_list without script should fail to parse");
     }
 
@@ -2553,7 +2924,7 @@ mod tests {
             "bad.yaml",
             "phrase: test\ntitle: Test\naction:\n  type: script_action\n  config:\n    result_action: paste_text\n",
         );
-        let result = load_from_dir(dir.path(), true, false).unwrap();
+        let result = load_from_dir(dir.path(), true, false, "shared").unwrap();
         assert!(result.commands.is_empty(), "script_action without script should fail to parse");
     }
 
@@ -2565,7 +2936,7 @@ mod tests {
             "bad.yaml",
             "phrase: test\ntitle: Test\naction:\n  type: script_action\n  config:\n    script: test.sh\n",
         );
-        let result = load_from_dir(dir.path(), true, false).unwrap();
+        let result = load_from_dir(dir.path(), true, false, "shared").unwrap();
         assert!(result.commands.is_empty(), "script_action without result_action should fail to parse");
     }
 
@@ -2578,7 +2949,7 @@ mod tests {
             "good.yaml",
             "phrase: open google\ntitle: Open Google\naction:\n  type: open_url\n  config:\n    url: https://www.google.com\n",
         );
-        let result = load_from_dir(dir.path(), true, false).unwrap();
+        let result = load_from_dir(dir.path(), true, false, "shared").unwrap();
         assert_eq!(result.commands.len(), 1, "empty file should be skipped");
     }
 
@@ -2586,7 +2957,7 @@ mod tests {
     fn yaml_with_only_whitespace_is_skipped() {
         let dir = TempDir::new().unwrap();
         write_yaml(&dir, "ws.yaml", "   \n\n  \n");
-        let result = load_from_dir(dir.path(), true, false).unwrap();
+        let result = load_from_dir(dir.path(), true, false, "shared").unwrap();
         assert!(result.commands.is_empty());
     }
 
@@ -2601,7 +2972,7 @@ mod tests {
             "good.yaml",
             "phrase: open google\ntitle: Open Google\naction:\n  type: open_url\n  config:\n    url: https://www.google.com\n",
         );
-        let result = load_from_dir(dir.path(), true, false).unwrap();
+        let result = load_from_dir(dir.path(), true, false, "shared").unwrap();
         assert_eq!(result.commands.len(), 1, "only valid command should load");
         assert_eq!(result.commands[0].phrase, "open google");
     }
@@ -2610,14 +2981,28 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn run_script_nonzero_exit_returns_output() {
+    fn run_script_nonzero_exit_returns_err_with_stderr() {
         let dir = TempDir::new().unwrap();
-        make_script(&dir, "fail.sh", "#!/bin/sh\necho 'partial output'\nexit 1\n");
+        make_script(&dir, "fail.sh", "#!/bin/sh\necho 'partial output'\necho 'something went wrong' >&2\nexit 1\n");
         let env = test_env(&dir);
-        // Non-zero exit still returns whatever stdout was produced
-        let items = run_script(dir.path(), "fail.sh", None, &env).unwrap();
-        assert_eq!(items.len(), 1);
-        assert_eq!(items[0].title, "partial output");
+        // Non-zero exit is now treated as an error; stderr appears in the message
+        let result = run_script(dir.path(), "fail.sh", None, &env);
+        assert!(result.is_err(), "non-zero exit must return Err");
+        let msg = result.unwrap_err();
+        assert!(msg.contains("exit 1") || msg.contains("1"), "error should include exit code");
+        assert!(msg.contains("something went wrong"), "error should include first stderr line");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_script_nonzero_exit_no_stderr_returns_generic_err() {
+        let dir = TempDir::new().unwrap();
+        make_script(&dir, "fail-silent.sh", "#!/bin/sh\nexit 2\n");
+        let env = test_env(&dir);
+        let result = run_script(dir.path(), "fail-silent.sh", None, &env);
+        assert!(result.is_err(), "non-zero exit must return Err even with no stderr");
+        let msg = result.unwrap_err();
+        assert!(msg.contains("2") || msg.contains("code"), "error should mention exit code");
     }
 
     #[cfg(unix)]
@@ -2763,7 +3148,7 @@ mod tests {
             "b.yaml",
             "phrase: open google\ntitle: Second\naction:\n  type: open_url\n  config:\n    url: https://duckduckgo.com\n",
         );
-        let result = load_from_dir(dir.path(), false, false).unwrap();
+        let result = load_from_dir(dir.path(), false, false, "shared").unwrap();
         assert_eq!(result.commands.len(), 1, "case-insensitive duplicate should be caught");
         assert_eq!(result.duplicates.len(), 1);
     }
@@ -2786,7 +3171,7 @@ mod tests {
             "c.yaml",
             "phrase: open google\ntitle: Third\naction:\n  type: open_url\n  config:\n    url: https://c.com\n",
         );
-        let result = load_from_dir(dir.path(), false, false).unwrap();
+        let result = load_from_dir(dir.path(), false, false, "shared").unwrap();
         assert_eq!(result.commands.len(), 1, "only one command survives");
         assert_eq!(result.duplicates.len(), 2, "two duplicate warnings");
     }
@@ -2814,7 +3199,7 @@ mod tests {
             "b-paste.yaml",
             "phrase: paste email\ntitle: Second Paste\naction:\n  type: paste_text\n  config:\n    text: b@test.com\n",
         );
-        let result = load_from_dir(dir.path(), false, false).unwrap();
+        let result = load_from_dir(dir.path(), false, false, "shared").unwrap();
         assert_eq!(result.commands.len(), 2, "one of each phrase survives");
         assert_eq!(result.duplicates.len(), 2, "one duplicate warning per phrase");
     }
@@ -2832,7 +3217,7 @@ mod tests {
             "good.yaml",
             "phrase: open google\ntitle: Good\naction:\n  type: open_url\n  config:\n    url: https://google.com\n",
         );
-        let result = load_from_dir(dir.path(), true, false).unwrap();
+        let result = load_from_dir(dir.path(), true, false, "shared").unwrap();
         assert_eq!(result.commands.len(), 1, "only non-reserved command loads");
         assert_eq!(result.reserved.len(), 1, "reserved phrase still caught");
     }
@@ -2850,7 +3235,7 @@ mod tests {
             "b.yaml",
             "phrase: open google\ntitle: Enabled\naction:\n  type: open_url\n  config:\n    url: https://enabled.com\n",
         );
-        let result = load_from_dir(dir.path(), false, false).unwrap();
+        let result = load_from_dir(dir.path(), false, false, "shared").unwrap();
         assert_eq!(result.commands.len(), 1, "enabled command loads");
         assert!(result.duplicates.is_empty(), "disabled command does not trigger duplicate");
         assert_eq!(result.commands[0].title, "Enabled");
@@ -2869,7 +3254,7 @@ mod tests {
             "good.yaml",
             "phrase: open google\ntitle: Good\naction:\n  type: open_url\n  config:\n    url: https://google.com\n",
         );
-        let result = load_from_dir(dir.path(), false, false).unwrap();
+        let result = load_from_dir(dir.path(), false, false, "shared").unwrap();
         assert_eq!(result.commands.len(), 1, "valid command loads");
         assert!(result.duplicates.is_empty(), "malformed file does not count as duplicate");
     }
@@ -2902,7 +3287,7 @@ mod tests {
             "good2.yaml",
             "phrase: paste email\ntitle: Paste Email\naction:\n  type: paste_text\n  config:\n    text: test@test.com\n",
         );
-        let result = load_from_dir(dir.path(), true, false).unwrap();
+        let result = load_from_dir(dir.path(), true, false, "shared").unwrap();
         assert_eq!(result.commands.len(), 2, "only valid+enabled commands load");
         assert_eq!(result.reserved.len(), 1, "reserved phrase tracked");
     }
@@ -2925,14 +3310,14 @@ mod tests {
             "deep/a/b/deep.yaml",
             "phrase: copy text\ntitle: Deep\naction:\n  type: copy_text\n  config:\n    text: deep\n",
         );
-        let result = load_from_dir(dir.path(), true, false).unwrap();
+        let result = load_from_dir(dir.path(), true, false, "shared").unwrap();
         assert_eq!(result.commands.len(), 3, "all nested levels load");
     }
 
     #[test]
     fn empty_directory_returns_no_commands() {
         let dir = TempDir::new().unwrap();
-        let result = load_from_dir(dir.path(), true, false).unwrap();
+        let result = load_from_dir(dir.path(), true, false, "shared").unwrap();
         assert!(result.commands.is_empty());
         assert!(result.duplicates.is_empty());
         assert!(result.reserved.is_empty());
@@ -2943,7 +3328,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let new_dir = dir.path().join("does-not-exist");
         assert!(!new_dir.exists());
-        let result = load_from_dir(&new_dir, true, false).unwrap();
+        let result = load_from_dir(&new_dir, true, false, "shared").unwrap();
         assert!(new_dir.exists(), "directory should be created");
         assert!(result.commands.is_empty());
     }
@@ -3029,5 +3414,195 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let env = test_env(&dir);
         assert!(resolve_list_path("../secret", dir.path(), &env).is_err());
+    }
+
+    // ── Spec-vs-code consistency tests ────────────────────────────────────
+    //
+    // These tests parse the nimble-spec.yaml examples through the real serde
+    // structs. Because every config struct uses `#[serde(deny_unknown_fields)]`,
+    // a field-name mismatch between the spec and code will fail deserialization.
+
+    /// The embedded nimble-spec.yaml file (same `include_str!` as lib.rs).
+    const SPEC_YAML: &str = include_str!("../../.github/skills/nimble-authoring/nimble-spec.yaml");
+
+    /// Helper: parse the spec YAML into a serde_yaml::Value.
+    fn load_spec() -> serde_yaml::Value {
+        serde_yaml::from_str(SPEC_YAML).expect("nimble-spec.yaml must be valid YAML")
+    }
+
+    /// Extract the `example` string for a given action type from the spec.
+    fn spec_example(spec: &serde_yaml::Value, action_type: &str) -> String {
+        spec["action_types"][action_type]["example"]
+            .as_str()
+            .unwrap_or_else(|| panic!("spec action_types.{action_type}.example must exist"))
+            .to_string()
+    }
+
+    /// Wrap an action YAML fragment in a full command so it can be deserialized
+    /// as a `Command` struct.
+    fn wrap_as_command(action_yaml: &str) -> String {
+        format!("phrase: spec test\ntitle: Spec test\n{action_yaml}")
+    }
+
+    #[test]
+    fn spec_example_open_url_parses() {
+        let spec = load_spec();
+        let yaml = wrap_as_command(&spec_example(&spec, "open_url"));
+        let cmd: Command = serde_yaml::from_str(&yaml)
+            .expect("spec open_url example must deserialize as Command");
+        assert!(matches!(cmd.action, Action::OpenUrl(_)));
+    }
+
+    #[test]
+    fn spec_example_paste_text_parses() {
+        let spec = load_spec();
+        let yaml = wrap_as_command(&spec_example(&spec, "paste_text"));
+        let cmd: Command = serde_yaml::from_str(&yaml)
+            .expect("spec paste_text example must deserialize as Command");
+        assert!(matches!(cmd.action, Action::PasteText(_)));
+    }
+
+    #[test]
+    fn spec_example_copy_text_parses() {
+        let spec = load_spec();
+        let yaml = wrap_as_command(&spec_example(&spec, "copy_text"));
+        let cmd: Command = serde_yaml::from_str(&yaml)
+            .expect("spec copy_text example must deserialize as Command");
+        assert!(matches!(cmd.action, Action::CopyText(_)));
+    }
+
+    #[test]
+    fn spec_example_static_list_parses() {
+        let spec = load_spec();
+        let yaml = wrap_as_command(&spec_example(&spec, "static_list"));
+        let cmd: Command = serde_yaml::from_str(&yaml)
+            .expect("spec static_list example must deserialize as Command");
+        assert!(matches!(cmd.action, Action::StaticList(_)));
+    }
+
+    #[test]
+    fn spec_example_dynamic_list_parses() {
+        let spec = load_spec();
+        let yaml = wrap_as_command(&spec_example(&spec, "dynamic_list"));
+        let cmd: Command = serde_yaml::from_str(&yaml)
+            .expect("spec dynamic_list example must deserialize as Command");
+        assert!(matches!(cmd.action, Action::DynamicList(_)));
+    }
+
+    #[test]
+    fn spec_example_script_action_parses() {
+        let spec = load_spec();
+        let yaml = wrap_as_command(&spec_example(&spec, "script_action"));
+        let cmd: Command = serde_yaml::from_str(&yaml)
+            .expect("spec script_action example must deserialize as Command");
+        assert!(matches!(cmd.action, Action::ScriptAction(_)));
+    }
+
+    /// Verify that every config field name listed in the spec for each action
+    /// type is accepted by the corresponding Rust struct (deny_unknown_fields
+    /// will reject any field not defined on the struct).
+    #[test]
+    fn spec_dynamic_list_fields_accepted_by_struct() {
+        // Use all fields the spec lists for dynamic_list.
+        let yaml = wrap_as_command(
+            "action:\n  type: dynamic_list\n  config:\n    script: test.sh\n    arg: required\n    item_action: paste_text\n",
+        );
+        let cmd: Command = serde_yaml::from_str(&yaml)
+            .expect("dynamic_list with all spec fields must parse");
+        assert!(matches!(cmd.action, Action::DynamicList(_)));
+    }
+
+    #[test]
+    fn spec_static_list_fields_accepted_by_struct() {
+        let yaml = wrap_as_command(
+            "action:\n  type: static_list\n  config:\n    list: emails\n    item_action: copy_text\n",
+        );
+        let cmd: Command = serde_yaml::from_str(&yaml)
+            .expect("static_list with all spec fields must parse");
+        assert!(matches!(cmd.action, Action::StaticList(_)));
+    }
+
+    #[test]
+    fn spec_script_action_fields_accepted_by_struct() {
+        let yaml = wrap_as_command(
+            "action:\n  type: script_action\n  config:\n    script: run.sh\n    arg: optional\n    result_action: paste_text\n    prefix: \">\"\n    suffix: \"\\n\"\n",
+        );
+        let cmd: Command = serde_yaml::from_str(&yaml)
+            .expect("script_action with all spec fields must parse");
+        assert!(matches!(cmd.action, Action::ScriptAction(_)));
+    }
+
+    /// Confirm that deny_unknown_fields catches field-name mismatches.
+    /// This is the exact bug we fixed: result_action doesn't belong on dynamic_list.
+    #[test]
+    fn dynamic_list_rejects_result_action_field() {
+        let yaml = wrap_as_command(
+            "action:\n  type: dynamic_list\n  config:\n    script: test.sh\n    result_action: paste_text\n",
+        );
+        assert!(
+            serde_yaml::from_str::<Command>(&yaml).is_err(),
+            "dynamic_list must reject result_action (belongs to script_action)"
+        );
+    }
+
+    #[test]
+    fn dynamic_list_rejects_prefix_suffix_fields() {
+        let yaml = wrap_as_command(
+            "action:\n  type: dynamic_list\n  config:\n    script: test.sh\n    item_action: paste_text\n    prefix: x\n",
+        );
+        assert!(
+            serde_yaml::from_str::<Command>(&yaml).is_err(),
+            "dynamic_list must reject prefix (belongs to script_action)"
+        );
+    }
+
+    #[test]
+    fn script_action_rejects_item_action_field() {
+        let yaml = wrap_as_command(
+            "action:\n  type: script_action\n  config:\n    script: test.sh\n    item_action: paste_text\n",
+        );
+        assert!(
+            serde_yaml::from_str::<Command>(&yaml).is_err(),
+            "script_action must reject item_action (belongs to dynamic_list/static_list)"
+        );
+    }
+
+    /// Verify that the spec's action_types section covers exactly the same
+    /// set of action types that the Action enum supports.
+    #[test]
+    fn spec_covers_all_action_types() {
+        let spec = load_spec();
+        let action_types = spec["action_types"]
+            .as_mapping()
+            .expect("action_types must be a mapping");
+        let spec_keys: std::collections::HashSet<String> = action_types
+            .keys()
+            .map(|k| k.as_str().unwrap().to_string())
+            .collect();
+
+        // These are the Action enum variant names in snake_case.
+        let code_types: std::collections::HashSet<String> = [
+            "open_url",
+            "paste_text",
+            "copy_text",
+            "static_list",
+            "dynamic_list",
+            "script_action",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+
+        let missing_from_spec: Vec<_> = code_types.difference(&spec_keys).collect();
+        let extra_in_spec: Vec<_> = spec_keys.difference(&code_types).collect();
+
+        assert!(
+            missing_from_spec.is_empty(),
+            "Action types in code but missing from spec: {missing_from_spec:?}"
+        );
+        assert!(
+            extra_in_spec.is_empty(),
+            "Action types in spec but not in code: {extra_in_spec:?}"
+        );
     }
 }

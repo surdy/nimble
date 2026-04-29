@@ -626,7 +626,9 @@ fn save_settings(
     };
 
     let old_root = app.state::<CommandsRoot>().0.lock().unwrap().clone();
-    let old_allow_dupes = app.state::<SettingsState>().0.lock().unwrap().allow_duplicates;
+    let settings_state = app.state::<SettingsState>();
+    let old_allow_dupes = settings_state.0.lock().unwrap().allow_duplicates;
+    let old_shared_dir = settings_state.0.lock().unwrap().shared_dir.clone();
 
     // Persist the new settings.
     {
@@ -634,20 +636,21 @@ fn save_settings(
         let mut state = binding.0.lock().unwrap();
         state.show_context_chip = show_context_chip;
         state.allow_duplicates = allow_duplicates;
-        state.shared_dir = shared_dir;
+        state.shared_dir = shared_dir.clone();
         state.commands_dir = commands_dir;
         settings::save(&config_dir, &state)?;
     }
 
-    // If the commands directory or dedup policy changed, update the shared
-    // CommandsRoot state and tell the watcher to switch directories.
-    if new_root != old_root || allow_duplicates != old_allow_dupes {
+    // If the commands directory, dedup policy, or shared_dir changed, update
+    // the shared CommandsRoot state and tell the watcher to switch directories.
+    if new_root != old_root || allow_duplicates != old_allow_dupes || shared_dir != old_shared_dir {
         *app.state::<CommandsRoot>().0.lock().unwrap() = new_root.clone();
 
         let ctrl = app.state::<WatcherControl>();
         let _ = ctrl.0.lock().unwrap().send(watcher::WatcherCommand::Reconfigure {
             commands_dir: new_root,
             allow_duplicates,
+            shared_dir,
         });
     }
 
@@ -728,7 +731,8 @@ fn get_preferences_initial_tab(app: tauri::AppHandle) -> String {
 #[tauri::command]
 fn list_command_files(app: tauri::AppHandle) -> Result<Vec<CommandFileMeta>, String> {
     let commands_root = app.state::<CommandsRoot>().0.lock().unwrap().clone();
-    let result = commands::load_from_dir(&commands_root, true, false)?;
+    let shared_dir = app.state::<SettingsState>().0.lock().unwrap().shared_dir.clone();
+    let result = commands::load_from_dir(&commands_root, true, false, &shared_dir)?;
     let mut metas: Vec<CommandFileMeta> = result
         .commands
         .into_iter()
@@ -980,7 +984,7 @@ fn save_command_file(
 
     // Notify all windows (especially the launcher) that commands changed.
     let settings = app.state::<SettingsState>().0.lock().unwrap().clone();
-    if let Ok(load_result) = commands::load_from_dir(&commands_root, settings.allow_duplicates, false) {
+    if let Ok(load_result) = commands::load_from_dir(&commands_root, settings.allow_duplicates, false, &settings.shared_dir) {
         app.emit("commands://reloaded", &load_result).ok();
     }
 
@@ -998,7 +1002,7 @@ fn delete_command_file(app: tauri::AppHandle, file_path: String) -> Result<(), S
 
     let commands_root = app.state::<CommandsRoot>().0.lock().unwrap().clone();
     let settings = app.state::<SettingsState>().0.lock().unwrap().clone();
-    if let Ok(load_result) = commands::load_from_dir(&commands_root, settings.allow_duplicates, false) {
+    if let Ok(load_result) = commands::load_from_dir(&commands_root, settings.allow_duplicates, false, &settings.shared_dir) {
         app.emit("commands://reloaded", &load_result).ok();
     }
     Ok(())
@@ -1190,7 +1194,7 @@ fn list_commands(app: tauri::AppHandle) -> Result<commands::LoadResult, String> 
     let commands_root = app.state::<CommandsRoot>().0.lock().unwrap().clone();
     let state = app.state::<SettingsState>();
     let settings = state.0.lock().unwrap();
-    commands::load_from_dir(&commands_root, settings.allow_duplicates, settings.seed_examples)
+    commands::load_from_dir(&commands_root, settings.allow_duplicates, settings.seed_examples, &settings.shared_dir)
 }
 
 // ── ScriptEnv builder ──────────────────────────────────────────────────────────
@@ -1308,6 +1312,22 @@ fn run_script_action(
     let ctx = ScriptEnvContext::from_app(&app, &command_dir, &inline_env)?;
     let env = ctx.env(&context, &phrase);
     commands::run_script_values(&ctx.command_dir, &script_name, arg.as_deref(), &env)
+}
+
+/// Run a script in raw mode and return stdout, stderr, exit code, and timing.
+/// Used by the preferences "Test" button — never fails on a non-zero exit code,
+/// instead the raw result is forwarded to the frontend for display.
+#[tauri::command]
+fn test_script(
+    app: tauri::AppHandle,
+    command_dir: String,
+    script_name: String,
+    arg: Option<String>,
+    inline_env: std::collections::HashMap<String, String>,
+) -> Result<commands::ScriptTestResult, String> {
+    let ctx = ScriptEnvContext::from_app(&app, &command_dir, &inline_env)?;
+    let env = ctx.env("", "");
+    commands::spawn_script_raw(&ctx.command_dir, &script_name, arg.as_deref(), &env)
 }
 
 /// Dismiss the launcher intentionally (Escape key, hotkey while visible, tray Hide).
@@ -1552,6 +1572,7 @@ pub fn run() {
                 }
             }
             let allow_duplicates = loaded_settings.allow_duplicates;
+            let shared_dir = loaded_settings.shared_dir.clone();
             let commands_root = loaded_settings.commands_root(&config_dir);
             app.manage(SettingsState(Mutex::new(loaded_settings)));
             app.manage(CommandsRoot(Mutex::new(commands_root.clone())));
@@ -1563,7 +1584,7 @@ pub fn run() {
             app.manage(PreferencesInitialTab(Mutex::new("commands".to_string())));
 
             // Start watching the commands subdirectory for live command reloads
-            let watcher_tx = watcher::start(app.handle().clone(), commands_root, allow_duplicates);
+            let watcher_tx = watcher::start(app.handle().clone(), commands_root, allow_duplicates, shared_dir);
             app.manage(WatcherControl(Mutex::new(watcher_tx)));
 
             // Listen for incoming deep-link URLs (nimble://...) and route them.
@@ -1647,7 +1668,7 @@ pub fn run() {
 
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![hide_window, show_window, dismiss_launcher, register_shortcut, get_settings, get_default_commands_dir, save_hotkey, save_settings, open_preferences_window, get_preferences_initial_tab, list_command_files, save_command_file, delete_command_file, reveal_in_file_manager, open_in_default_editor, list_command_folders, read_script_file, write_script_file, save_context, load_context, list_commands, load_list, run_dynamic_list, run_script_action, open_url, paste_text, copy_text, deploy_skill, toggle_debug, is_debug, read_debug_log, open_debug_log, browse_directory])
+        .invoke_handler(tauri::generate_handler![hide_window, show_window, dismiss_launcher, register_shortcut, get_settings, get_default_commands_dir, save_hotkey, save_settings, open_preferences_window, get_preferences_initial_tab, list_command_files, save_command_file, delete_command_file, reveal_in_file_manager, open_in_default_editor, list_command_folders, read_script_file, write_script_file, save_context, load_context, list_commands, load_list, run_dynamic_list, run_script_action, test_script, open_url, paste_text, copy_text, deploy_skill, toggle_debug, is_debug, read_debug_log, open_debug_log, browse_directory])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
@@ -1916,7 +1937,7 @@ mod tests {
     fn write_and_parse(yaml: &str) -> commands::Command {
         let dir = tempfile::TempDir::new().unwrap();
         std::fs::write(dir.path().join("test.yaml"), yaml).unwrap();
-        let result = commands::load_from_dir(dir.path(), true, false).unwrap();
+        let result = commands::load_from_dir(dir.path(), true, false, "shared").unwrap();
         assert_eq!(result.commands.len(), 1, "expected exactly 1 command");
         result.commands.into_iter().next().unwrap()
     }

@@ -97,12 +97,42 @@ export interface ReservedPhraseWarning {
   file: string;
 }
 
+/** A YAML command file that could not be read or parsed (skipped during loading). */
+export interface SkippedFileWarning {
+  /** Config-dir-relative path of the file that was skipped. */
+  file: string;
+  /** Human-readable reason (e.g. serde error with line/column info). */
+  reason: string;
+}
+
+/** A load-time validation warning for a successfully-parsed command. */
+export interface CommandWarning {
+  /** Config-dir-relative path of the file whose command triggered the warning. */
+  file: string;
+  /** Human-readable warning message. */
+  message: string;
+}
+
 /** Payload returned by list_commands and emitted as commands://reloaded. */
 export interface CommandsPayload {
   commands: Command[];
   duplicates: DuplicateWarning[];
   /** Commands rejected because their phrase starts with the reserved `ctx` prefix. */
   reserved: ReservedPhraseWarning[];
+  /** YAML files that could not be read or parsed. */
+  skipped: SkippedFileWarning[];
+  /** Load-time validation warnings for successfully-parsed commands. */
+  warnings: CommandWarning[];
+}
+
+/** Raw result of running a script in test mode (used by the preferences Test button). */
+export interface ScriptTestResult {
+  stdout: string;
+  stderr: string;
+  /** null if the process was killed or timed out */
+  exit_code: number | null;
+  duration_ms: number;
+  timed_out: boolean;
 }
 
 /** Application settings loaded from `settings.yaml` in the config directory. */

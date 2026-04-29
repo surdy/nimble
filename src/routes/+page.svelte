@@ -3,7 +3,7 @@
   import { invoke } from "@tauri-apps/api/core";
   import { getCurrentWindow, LogicalSize } from "@tauri-apps/api/window";
   import { listen, emit } from "@tauri-apps/api/event";
-  import type { Action, AppSettings, Command, CommandFileMeta, CommandsPayload, DuplicateWarning, ListItem, ReservedPhraseWarning } from "$lib/types";
+  import type { Action, AppSettings, Command, CommandFileMeta, CommandsPayload, CommandWarning, DuplicateWarning, ListItem, ReservedPhraseWarning, SkippedFileWarning } from "$lib/types";
   import { actionBadge, highlight, eventToShortcut, shortenPath, filterCommands, isParamMode, computeEffectiveInput } from "$lib/helpers";
 
   // ── State ──────────────────────────────────────────────────────────────
@@ -37,8 +37,10 @@
   // Duplicate-command warnings from the last load / reload cycle
   let warnings = $state<DuplicateWarning[]>([]);
   let reservedWarnings = $state<ReservedPhraseWarning[]>([]);
+  let skippedWarnings = $state<SkippedFileWarning[]>([]);
+  let commandWarnings = $state<CommandWarning[]>([]);
   let warningsDismissed = $state(false);
-  const totalWarnings = $derived(warnings.length + reservedWarnings.length);
+  const totalWarnings = $derived(warnings.length + reservedWarnings.length + skippedWarnings.length + commandWarnings.length);
   const warningVisible = $derived(totalWarnings > 0 && !warningsDismissed);
 
   // Active context — empty string means no context is set
@@ -100,10 +102,15 @@
   // Script editor
   let cmdScriptContent = $state("");
   let cmdScriptExists = $state(false);
+  let cmdInlineEnv = $state<Record<string, string>>({});
   let cmdScriptLoading = $state(false);
   let cmdScriptDirty = $state(false);
   let cmdScriptSaving = $state(false);
   let cmdScriptError = $state("");
+  // Test run
+  let cmdTestResult = $state<import("$lib/types").ScriptTestResult | null>(null);
+  let cmdTestRunning = $state(false);
+  let cmdTestArg = $state("");
   // When the filter query changes, auto-expand all folders so matches are visible.
   // The user can still manually collapse folders during the same search.
   $effect(() => {
@@ -258,6 +265,8 @@
   let listItems = $state<ListItem[]>([]);
   let activeListCmd = $state<Command | null>(null);
   let dynamicListLoaded = $state(false); // true once a dynamic_list invoke has resolved
+  // Loading state for slow-script feedback: "idle" | "running" | "slow" | "very_slow"
+  let scriptLoadingState = $state<"idle" | "running" | "slow" | "very_slow">("idle");
   // Inline error from script_action execution (shown as an error row in the results area)
   let actionError = $state<string | null>(null);
   let resultsEl: HTMLDivElement | undefined = $state();
@@ -289,11 +298,12 @@
   const allFiltered = $derived([...filteredBuiltins, ...filtered]);
 
   // True when the typed input matches a list command and we should show list UI.
-  // Includes the empty-resolved state for dynamic lists ("No results" feedback).
+  // Includes the empty-resolved state for dynamic lists ("No results" feedback),
+  // and the in-progress state while the script is executing.
   const showingList = $derived(
     activeListCmd !== null && (
       listItems.length > 0 ||
-      (activeListCmd.action.type === "dynamic_list" && dynamicListLoaded)
+      (activeListCmd.action.type === "dynamic_list" && (dynamicListLoaded || scriptLoadingState !== "idle"))
     )
   );
 
@@ -372,6 +382,7 @@
           activeListCmd = null;
           listItems = [];
           dynamicListLoaded = false;
+          scriptLoadingState = "idle";
           return;
         }
       }
@@ -382,9 +393,18 @@
 
       const runDynamic = (arg: string | null) => {
         dynamicListLoaded = false;
+        scriptLoadingState = "running";
+        let slowTimer = setTimeout(() => { scriptLoadingState = "slow"; }, 2000);
+        let verySlowTimer = setTimeout(() => { scriptLoadingState = "very_slow"; }, 4000);
         invoke<ListItem[]>("run_dynamic_list", { commandDir, scriptName: config.script, arg, context: activeContext, phrase: dynMatch.phrase, inlineEnv: dynMatch.env })
-          .then(items => { listItems = items; selectedIndex = 0; dynamicListLoaded = true; })
+          .then(items => {
+            clearTimeout(slowTimer); clearTimeout(verySlowTimer);
+            scriptLoadingState = "idle";
+            listItems = items; selectedIndex = 0; dynamicListLoaded = true;
+          })
           .catch((err) => {
+            clearTimeout(slowTimer); clearTimeout(verySlowTimer);
+            scriptLoadingState = "idle";
             listItems = [{ title: "⚠️ Script error", subtext: String(err) }];
             dynamicListLoaded = true;
           });
@@ -398,6 +418,7 @@
           activeListCmd = null;
           listItems = [];
           dynamicListLoaded = false;
+          scriptLoadingState = "idle";
         }
       } else if (argMode === "optional") {
         activeListCmd = dynMatch;
@@ -415,6 +436,7 @@
           activeListCmd = null;
           listItems = [];
           dynamicListLoaded = false;
+          scriptLoadingState = "idle";
         }
       }
 
@@ -425,6 +447,7 @@
     activeListCmd = null;
     listItems = [];
     dynamicListLoaded = false;
+    scriptLoadingState = "idle";
     showingDebugLog = false;
   });
 
@@ -483,6 +506,10 @@
   async function cmdRefreshList() {
     cmdList = await invoke<CommandFileMeta[]>("list_command_files").catch(() => []);
     cmdFolders = await invoke<string[]>("list_command_folders").catch(() => []);
+    // Also refresh load-time warnings so the prefs Commands tab stays in sync.
+    const payload = await invoke<CommandsPayload>("list_commands").catch(() => ({ commands: [], duplicates: [], reserved: [], skipped: [], warnings: [] }));
+    skippedWarnings = payload.skipped ?? [];
+    commandWarnings = payload.warnings ?? [];
   }
 
   function cmdSelectItem(meta: CommandFileMeta) {
@@ -497,6 +524,7 @@
     cmdScriptExists = false;
     cmdScriptDirty = false;
     cmdScriptError = "";
+    cmdTestResult = null;
     if (meta.action_type === "open_url" || meta.action_type === "paste_text" || meta.action_type === "copy_text" || meta.action_type === "static_list" || meta.action_type === "dynamic_list" || meta.action_type === "script_action") {
       cmdActionType = meta.action_type;
     } else {
@@ -511,11 +539,15 @@
     cmdResultAction = "paste_text";
     cmdPrefix = "";
     cmdSuffix = "";
+    cmdTestArg = "";
+    cmdTestResult = null;
+    cmdInlineEnv = {};
     // Load full config from backend to populate form fields
     invoke<{ commands: import("$lib/types").Command[] }>("list_commands")
       .then(result => {
         const full = result.commands.find(c => c.phrase.toLowerCase() === meta.phrase.toLowerCase());
         if (!full) return;
+        cmdInlineEnv = full.env ?? {};
         if (full.action.type === "open_url") cmdUrl = full.action.config.url;
         else if (full.action.type === "paste_text") cmdText = full.action.config.text;
         else if (full.action.type === "copy_text") cmdText = full.action.config.text;
@@ -594,6 +626,29 @@
     }
   }
 
+  /** Run the script in test mode and capture raw stdout/stderr/exit code. */
+  async function cmdRunTest() {
+    if (!cmdScript.trim() || cmdScriptIsExternal) return;
+    const commandDir = cmdIsNew
+      ? (cmdTargetDir || "")
+      : (cmdList.find(c => c.file_path === cmdSelectedFile)?.source_dir ?? "");
+    cmdTestRunning = true;
+    cmdTestResult = null;
+    try {
+      const result = await invoke<import("$lib/types").ScriptTestResult>("test_script", {
+        commandDir,
+        scriptName: cmdScript.trim(),
+        arg: cmdTestArg.trim() || undefined,
+        inlineEnv: cmdInlineEnv,
+      });
+      cmdTestResult = result;
+    } catch (err) {
+      cmdTestResult = { stdout: "", stderr: String(err), exit_code: null, duration_ms: 0, timed_out: false };
+    } finally {
+      cmdTestRunning = false;
+    }
+  }
+
   /** Generate a starter script template for a new command. */
   function cmdGetScriptTemplate(actionType: string): string {
     if (actionType === "dynamic_list") {
@@ -638,6 +693,8 @@ echo "Hello, world!"
     cmdResultAction = "paste_text";
     cmdPrefix = "";
     cmdSuffix = "";
+    cmdTestArg = "";
+    cmdTestResult = null;
     cmdSaveError = "";
     cmdDeleteConfirm = false;
     cmdTargetDir = "";
@@ -647,6 +704,7 @@ echo "Hello, world!"
     cmdScriptExists = false;
     cmdScriptDirty = false;
     cmdScriptError = "";
+    cmdInlineEnv = {};
   }
 
   function cmdCancelNew() {
@@ -857,10 +915,12 @@ echo "Hello, world!"
       onboarding = false;
       await appWindow.setSize(LAUNCHER_SIZE);
       // Load commands now that onboarding is complete
-      const result = await invoke<CommandsPayload>("list_commands").catch(() => ({ commands: [], duplicates: [], reserved: [] }));
+      const result = await invoke<CommandsPayload>("list_commands").catch(() => ({ commands: [], duplicates: [], reserved: [], skipped: [], warnings: [] }));
       commands = result.commands;
       warnings = result.duplicates;
       reservedWarnings = result.reserved;
+      skippedWarnings = result.skipped ?? [];
+      commandWarnings = result.warnings ?? [];
       warningsDismissed = false;
       dismiss();
     } catch (err) {
@@ -1185,10 +1245,12 @@ echo "Hello, world!"
         // Hotkey already registered by Rust on startup (or just migrated above).
         // Resize to launcher bar, load commands, then hide.
         await appWindow.setSize(LAUNCHER_SIZE);
-        const result = await invoke<CommandsPayload>("list_commands").catch(() => ({ commands: [], duplicates: [], reserved: [] }));
+        const result = await invoke<CommandsPayload>("list_commands").catch(() => ({ commands: [], duplicates: [], reserved: [], skipped: [], warnings: [] }));
         commands = result.commands;
         warnings = result.duplicates;
         reservedWarnings = result.reserved;
+        skippedWarnings = result.skipped ?? [];
+        commandWarnings = result.warnings ?? [];
         warningsDismissed = false;
         dismiss();
       } else {
@@ -1210,6 +1272,8 @@ echo "Hello, world!"
         commands = event.payload.commands;
         warnings = event.payload.duplicates;
         reservedWarnings = event.payload.reserved;
+        skippedWarnings = event.payload.skipped ?? [];
+        commandWarnings = event.payload.warnings ?? [];
         warningsDismissed = false; // always surface new warnings
         // If a list is currently displayed, refresh it in case its file changed
         if (activeListCmd && activeListCmd.action.type === "static_list") {
@@ -1309,6 +1373,35 @@ echo "Hello, world!"
 
     <!-- Commands tab -->
     {#if activePreferencesTab === "commands"}
+
+    <!-- Load-time warnings: skipped files + command warnings -->
+    {#if skippedWarnings.length > 0 || commandWarnings.length > 0}
+      <div class="prefs-warnings">
+        {#if skippedWarnings.length > 0}
+          <div class="prefs-warnings-section">
+            <span class="prefs-warnings-label">⚠ {skippedWarnings.length} file{skippedWarnings.length === 1 ? '' : 's'} could not be loaded</span>
+            {#each skippedWarnings as w}
+              <div class="prefs-warning-row">
+                <span class="prefs-warning-file">{w.file}</span>
+                <span class="prefs-warning-msg">{w.reason}</span>
+              </div>
+            {/each}
+          </div>
+        {/if}
+        {#if commandWarnings.length > 0}
+          <div class="prefs-warnings-section">
+            <span class="prefs-warnings-label">⚠ {commandWarnings.length} command warning{commandWarnings.length === 1 ? '' : 's'}</span>
+            {#each commandWarnings as w}
+              <div class="prefs-warning-row">
+                <span class="prefs-warning-file">{w.file}</span>
+                <span class="prefs-warning-msg">{w.message}</span>
+              </div>
+            {/each}
+          </div>
+        {/if}
+      </div>
+    {/if}
+
     <div class="cmd-editor">
       <!-- sidebar -->
       <div class="cmd-sidebar">
@@ -1448,7 +1541,7 @@ echo "Hello, world!"
                 id="cmd-action-type"
                 class="cmd-select"
                 bind:value={cmdActionType}
-                onchange={() => { cmdUrl = ""; cmdText = ""; cmdListName = ""; cmdItemAction = ""; cmdScript = ""; cmdArgMode = "none"; cmdResultAction = "paste_text"; cmdPrefix = ""; cmdSuffix = ""; }}
+                onchange={() => { cmdUrl = ""; cmdText = ""; cmdListName = ""; cmdItemAction = ""; cmdScript = ""; cmdArgMode = "none"; cmdResultAction = "paste_text"; cmdPrefix = ""; cmdSuffix = ""; cmdTestArg = ""; cmdTestResult = null; }}
               >
                 <option value="open_url">Open URL</option>
                 <option value="paste_text">Paste Text</option>
@@ -1649,7 +1742,47 @@ echo "Hello, world!"
                       disabled={!cmdScriptDirty || cmdScriptSaving}
                       onclick={cmdSaveScript}
                     >{cmdScriptSaving ? "Saving…" : "Save script"}</button>
+                    {#if cmdArgMode !== "none"}
+                      <input
+                        class="cmd-input cmd-test-arg-input"
+                        type="text"
+                        placeholder="Test argument…"
+                        autocomplete="off"
+                        autocorrect="off"
+                        autocapitalize="off"
+                        spellcheck="false"
+                        bind:value={cmdTestArg}
+                      />
+                    {/if}
+                    <button
+                      class="cmd-btn-tiny cmd-btn-test"
+                      disabled={cmdTestRunning || !cmdScriptExists}
+                      onclick={cmdRunTest}
+                    >{cmdTestRunning ? "Running…" : "Test"}</button>
                   </div>
+                  {#if cmdTestResult !== null}
+                    <div class="cmd-test-result" class:cmd-test-error={cmdTestResult.exit_code !== 0 || cmdTestResult.timed_out}>
+                      <div class="cmd-test-result-meta">
+                        {#if cmdTestResult.timed_out}
+                          <span class="cmd-test-badge cmd-test-badge-err">timed out</span>
+                        {:else}
+                          <span class="cmd-test-badge" class:cmd-test-badge-ok={cmdTestResult.exit_code === 0} class:cmd-test-badge-err={cmdTestResult.exit_code !== 0}>
+                            exit {cmdTestResult.exit_code ?? "?"}
+                          </span>
+                        {/if}
+                        <span class="cmd-test-duration">{cmdTestResult.duration_ms}ms</span>
+                      </div>
+                      {#if cmdTestResult.stdout}
+                        <pre class="cmd-test-output">{cmdTestResult.stdout}</pre>
+                      {/if}
+                      {#if cmdTestResult.stderr}
+                        <pre class="cmd-test-output cmd-test-stderr">{cmdTestResult.stderr}</pre>
+                      {/if}
+                      {#if !cmdTestResult.stdout && !cmdTestResult.stderr}
+                        <span class="cmd-test-empty">(no output)</span>
+                      {/if}
+                    </div>
+                  {/if}
                 {/if}
               </div>
             {/if}
@@ -1873,8 +2006,14 @@ echo "Hello, world!"
     {#if input.trim() !== ""}
       <div class="results" bind:this={resultsEl}>
         {#if showingList}
-          {#if listItems.length === 0}
-            <div class="no-results">No results</div>
+          {#if scriptLoadingState !== "idle" && !dynamicListLoaded}
+            {@const loadingMsg =
+              scriptLoadingState === "very_slow" ? "Script may be close to the 5s timeout…" :
+              scriptLoadingState === "slow" ? "Taking longer than expected…" : "Running…"}
+            <div class="no-results">{loadingMsg}</div>
+          {:else if listItems.length === 0}
+            {@const scriptName = activeListCmd?.action.type === "dynamic_list" ? activeListCmd.action.config.script : null}
+            <div class="no-results">No results returned{#if scriptName}&hairsp;<span class="no-results-hint">({scriptName})</span>{/if}</div>
           {:else}
             {#each listItems as item, i}
               <!-- svelte-ignore a11y_no_static_element_interactions -->
@@ -2280,6 +2419,57 @@ echo "Hello, world!"
     font-size: 13px;
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
     text-align: center;
+  }
+
+  .no-results-hint {
+    font-size: 11px;
+    opacity: 0.7;
+  }
+
+  /* ── Preferences window load-time warnings ──────────────────────────── */
+  .prefs-warnings {
+    border-bottom: 1px solid rgba(255, 159, 10, 0.25);
+    background: rgba(255, 159, 10, 0.07);
+    padding: 8px 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .prefs-warnings-section {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .prefs-warnings-label {
+    font-size: 11px;
+    font-weight: 600;
+    color: #ff9f0a;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  }
+
+  .prefs-warning-row {
+    display: flex;
+    flex-direction: column;
+    padding: 4px 8px;
+    background: rgba(255,159,10,0.08);
+    border-radius: 4px;
+    gap: 2px;
+  }
+
+  .prefs-warning-file {
+    font-size: 11px;
+    font-weight: 600;
+    color: rgba(245,245,247,0.9);
+    font-family: ui-monospace, "SF Mono", "Cascadia Code", monospace;
+  }
+
+  .prefs-warning-msg {
+    font-size: 11px;
+    color: rgba(245,245,247,0.6);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    word-break: break-word;
   }
 
   /* ── Duplicate warnings bar ─────────────────────────────────────────── */
@@ -3049,6 +3239,65 @@ echo "Hello, world!"
 
   .cmd-btn-create-script { color: #0a84ff; border-color: rgba(10,132,255,.3); }
   .cmd-btn-create-script:hover { background: rgba(10,132,255,.1); }
+
+  .cmd-btn-test { color: rgba(245,245,247,.7); }
+  .cmd-btn-test:hover:not(:disabled) { background: rgba(255,255,255,.12); }
+
+  .cmd-test-arg-input {
+    flex: 1;
+    min-width: 0;
+    height: 26px;
+    padding: 0 8px;
+    font-size: 11px;
+    border-radius: 5px;
+    border: 1px solid rgba(255,255,255,.12);
+    background: rgba(255,255,255,.06);
+    color: rgba(245,245,247,.9);
+  }
+  .cmd-test-arg-input::placeholder { color: rgba(245,245,247,.35); }
+
+  /* Test run result panel */
+  .cmd-test-result {
+    margin-top: 8px;
+    border: 1px solid rgba(255,255,255,.1);
+    border-radius: 7px;
+    overflow: hidden;
+    font-size: 11px;
+  }
+  .cmd-test-result.cmd-test-error { border-color: rgba(255,69,58,.35); }
+  .cmd-test-result-meta {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 10px;
+    background: rgba(255,255,255,.04);
+    border-bottom: 1px solid rgba(255,255,255,.06);
+  }
+  .cmd-test-result.cmd-test-error .cmd-test-result-meta { background: rgba(255,69,58,.07); border-bottom-color: rgba(255,69,58,.15); }
+  .cmd-test-badge {
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-size: 10px;
+    padding: 2px 6px;
+    border-radius: 4px;
+    font-weight: 600;
+  }
+  .cmd-test-badge-ok { background: rgba(48,209,88,.18); color: #30d158; }
+  .cmd-test-badge-err { background: rgba(255,69,58,.18); color: #ff453a; }
+  .cmd-test-duration { color: rgba(245,245,247,.35); font-size: 10px; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  .cmd-test-output {
+    margin: 0;
+    padding: 8px 10px;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-size: 11px;
+    color: rgba(245,245,247,.75);
+    white-space: pre-wrap;
+    word-break: break-all;
+    max-height: 140px;
+    overflow-y: auto;
+    background: rgba(0,0,0,.15);
+  }
+  .cmd-test-stderr { color: #ff6961; background: rgba(255,69,58,.06); }
+  .cmd-test-empty { display: block; padding: 8px 10px; color: rgba(245,245,247,.3); font-style: italic; }
 
   .cmd-location-path {
     font-family: ui-monospace, "SF Mono", Menlo, monospace;

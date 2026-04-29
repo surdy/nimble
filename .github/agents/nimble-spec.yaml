@@ -5,10 +5,10 @@
 # All Copilot skills and documentation should derive schema knowledge
 # from this file.
 #
-# Last updated: 2026-04-11
-# Spec version: 14
+# Last updated: 2026-04-19
+# Spec version: 16
 
-spec_version: 14
+spec_version: 16
 
 # ── Config directory locations ──────────────────────────────────────────
 config_dirs:
@@ -156,6 +156,36 @@ action_types:
         required: false
         default: none
         description: "Controls whether the script receives a user-typed suffix argument."
+      item_action:
+        type: "enum: paste_text | copy_text | open_url"
+        required: false
+        default: null
+        description: >
+          Action performed when a list item is selected. If absent, selecting
+          an item dismisses the launcher without further action.
+    co_location: "Command YAML + script in the same directory."
+    example: |
+      action:
+        type: dynamic_list
+        config:
+          script: contacts.sh
+          arg: optional
+          item_action: paste_text
+
+  script_action:
+    description: "Run a script and immediately act on the returned value(s)."
+    config:
+      script:
+        type: string
+        required: true
+        description: >
+          Script filename (co-located with command YAML), or shared:<name>
+          to reference a script in the shared directory.
+      arg:
+        type: "enum: none | optional | required"
+        required: false
+        default: none
+        description: "Controls whether the script receives a user-typed suffix argument."
       result_action:
         type: "enum: open_url | paste_text | copy_text"
         required: true
@@ -176,7 +206,6 @@ action_types:
         type: script_action
         config:
           script: timestamp.sh
-          arg: none
           result_action: paste_text
 
 # ── Action selection guide ──────────────────────────────────────────────
@@ -511,3 +540,11 @@ changelog:
       - "Replaced allow_external_paths boolean setting with shared_dir string setting (default: shared)."
       - "Renamed var_substitution section to shared_prefix with new semantics."
       - "Scripts/lists now resolve in exactly two locations: co-located or <commands_root>/<shared_dir>/."
+  - version: 15
+    date: "2026-04-19"
+    changes:
+      - "Fixed dynamic_list schema: replaced incorrect result_action (required) with item_action (optional), removed prefix/suffix fields (script_action only), fixed example type."
+  - version: 16
+    date: "2026-04-19"
+    changes:
+      - "Added missing script_action action type definition with full config schema and example."

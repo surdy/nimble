@@ -5,6 +5,20 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [1.1.0] — 2026-04-28
+
+### Added
+- **Test Run with argument input** — the Preferences Test button now includes a text field for passing arguments to `dynamic_list` and `script_action` scripts with `arg: optional` or `arg: required` modes
+- **Load-time YAML schema validation** — invalid command files are now detected at load time with clear error messages shown in Preferences, including field-name typos caught by strict schema validation
+- **Spec-vs-code consistency tests** — automated tests parse every example from `nimble-spec.yaml` through the real Rust structs, ensuring the spec and code never drift apart
+
+### Fixed
+- **Test Run argument field no longer autocorrects** — disabled autocorrect, autocomplete, autocapitalize, and spellcheck on the test argument input
+- **Test Run now passes inline env vars to scripts** — command-level `env:` variables are now included when running a script via the Test button
+- **`nimble-spec.yaml` accuracy** — fixed `dynamic_list` schema (was incorrectly showing `result_action` instead of `item_action`), added missing `script_action` action type definition
+
+---
+
 ## [1.0.0] — 2026-04-16
 
 ### Added

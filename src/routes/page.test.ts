@@ -66,6 +66,8 @@ beforeEach(() => {
           ],
           duplicates: [],
           reserved: [],
+          skipped: [],
+          warnings: [],
         };
       case "register_shortcut":
         return undefined;
@@ -186,6 +188,8 @@ describe("Launcher page", () => {
             commands: [],
             duplicates: [{ phrase: "open google", kept: "a.yaml", ignored: "b.yaml" }],
             reserved: [],
+            skipped: [],
+            warnings: [],
           };
         case "register_shortcut":
           return undefined;
