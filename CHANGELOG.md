@@ -5,6 +5,14 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [1.2.0] — 2026-05-05
+
+### Added
+- **Preferences UI redesign** — the Commands table now features sortable columns (Phrase, Title, Action, Modified), a "Modified" column with relative timestamps, action-type badges with icons, inline warning indicators, group-by segmented control (None/Folder/Type), bulk-select checkboxes with a bulk-action bar (Enable all, Disable all, Delete all), an About section in Settings, and a sidebar navigation for settings sections
+- **Client-side fuzzy filtering for lists** — static and dynamic list results are now filtered in real time as you type additional text after the command phrase, without re-invoking the script for each keystroke
+
+---
+
 ## [1.1.0] — 2026-04-28
 
 ### Added

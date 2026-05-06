@@ -1,4 +1,4 @@
-import type { Action, Command } from "./types";
+import type { Action, Command, ListItem } from "./types";
 
 // ── Action badge ────────────────────────────────────────────────────────
 /** Human-readable badge label for each action type. */
@@ -106,4 +106,60 @@ export function computeEffectiveInput(input: string, activeContext: string, comm
     return trimmed + " " + activeContext;
   }
   return trimmed;
+}
+
+// ── Fuzzy matching ──────────────────────────────────────────────────────
+
+/** Word-boundary characters for fuzzy scoring. */
+const BOUNDARY = new Set([" ", "-", "_", ".", "/", "\\"]);
+
+/**
+ * fzf-style fuzzy score: all characters in `pattern` must appear in `text` in
+ * order (case-insensitive). Returns a numeric score (higher = better match) or
+ * `null` when the pattern does not match.
+ *
+ * Scoring:
+ * - +1 per matched character
+ * - +2 bonus when the matched character is consecutive with the previous match
+ * - +3 bonus when the match is at the start of a word boundary
+ * - +2 bonus when the first pattern character matches the first text character
+ */
+export function fuzzyScore(pattern: string, text: string): number | null {
+  if (pattern === "") return 0;
+  const pLower = pattern.toLowerCase();
+  const tLower = text.toLowerCase();
+  let score = 0;
+  let pi = 0;
+  let lastMatchIdx = -2; // tracks the index of the previous match for consecutive bonus
+  for (let ti = 0; ti < tLower.length && pi < pLower.length; ti++) {
+    if (tLower[ti] === pLower[pi]) {
+      score += 1; // base point
+      if (ti === lastMatchIdx + 1) score += 2; // consecutive bonus
+      if (ti === 0 || BOUNDARY.has(tLower[ti - 1])) score += 3; // word-boundary bonus
+      if (pi === 0 && ti === 0) score += 2; // start-of-string bonus
+      lastMatchIdx = ti;
+      pi++;
+    }
+  }
+  return pi === pLower.length ? score : null;
+}
+
+/**
+ * Filter list items using fuzzy matching against both `title` and `subtext`.
+ * Returns matching items sorted by descending score.
+ * An empty filter returns all items unchanged.
+ */
+export function fuzzyFilterListItems(items: ListItem[], filter: string): ListItem[] {
+  if (filter === "") return items;
+  const scored: { item: ListItem; score: number }[] = [];
+  for (const item of items) {
+    const titleScore = fuzzyScore(filter, item.title);
+    const subtextScore = item.subtext ? fuzzyScore(filter, item.subtext) : null;
+    const best = Math.max(titleScore ?? -1, subtextScore ?? -1);
+    if (best >= 0) {
+      scored.push({ item, score: best });
+    }
+  }
+  scored.sort((a, b) => b.score - a.score);
+  return scored.map(s => s.item);
 }

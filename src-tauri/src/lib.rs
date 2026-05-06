@@ -675,6 +675,8 @@ struct CommandFileMeta {
     file_path: String,
     /// Relative directory containing the YAML file (empty string for root-level commands).
     source_dir: String,
+    /// File modification time as Unix timestamp in seconds (0 if unavailable).
+    modified: u64,
 }
 
 /// Open (or focus) the unified Preferences window, showing the requested tab.
@@ -751,6 +753,12 @@ fn list_command_files(app: tauri::AppHandle) -> Result<Vec<CommandFileMeta>, Str
             } else {
                 commands_root.join(&cmd.source_file).to_string_lossy().into_owned()
             };
+            let modified = std::fs::metadata(&file_path)
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
             CommandFileMeta {
                 phrase: cmd.phrase,
                 title: cmd.title,
@@ -758,6 +766,7 @@ fn list_command_files(app: tauri::AppHandle) -> Result<Vec<CommandFileMeta>, Str
                 action_type,
                 file_path,
                 source_dir: cmd.source_dir,
+                modified,
             }
         })
         .collect();

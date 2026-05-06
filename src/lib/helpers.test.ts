@@ -8,6 +8,8 @@ import {
   filterCommands,
   isParamMode,
   computeEffectiveInput,
+  fuzzyScore,
+  fuzzyFilterListItems,
 } from "$lib/helpers";
 
 // ── Helper to build a minimal Command ──────────────────────────────────
@@ -311,5 +313,120 @@ describe("computeEffectiveInput", () => {
 
   it("does not append context when input is only whitespace", () => {
     expect(computeEffectiveInput("   ", "work", cmds)).toBe("");
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════
+// fuzzyScore
+// ═══════════════════════════════════════════════════════════════════════
+describe("fuzzyScore", () => {
+  it("returns 0 for empty pattern", () => {
+    expect(fuzzyScore("", "anything")).toBe(0);
+  });
+
+  it("returns null when pattern does not match", () => {
+    expect(fuzzyScore("xyz", "Gmail")).toBeNull();
+  });
+
+  it("matches characters in order with gaps", () => {
+    const score = fuzzyScore("gml", "Gmail");
+    expect(score).not.toBeNull();
+    expect(score).toBeGreaterThan(0);
+  });
+
+  it("is case-insensitive", () => {
+    expect(fuzzyScore("gml", "Gmail")).toBe(fuzzyScore("GML", "gmail"));
+  });
+
+  it("scores exact substring higher than fuzzy with gaps", () => {
+    // "react" is 5 consecutive chars in "React Hooks"; "rhk" has gaps
+    const substringScore = fuzzyScore("react", "React Hooks")!;
+    const gapScore = fuzzyScore("rhk", "React Hooks")!;
+    expect(substringScore).toBeGreaterThan(gapScore);
+  });
+
+  it("gives word-boundary bonus", () => {
+    // "og" in "open google" — 'g' is at a word boundary
+    const boundaryScore = fuzzyScore("og", "open google")!;
+    // "og" in "opengoogle" — 'g' is NOT at a word boundary
+    const noBoundaryScore = fuzzyScore("og", "opengoogle")!;
+    expect(boundaryScore).toBeGreaterThan(noBoundaryScore);
+  });
+
+  it("gives start-of-string bonus", () => {
+    const startScore = fuzzyScore("op", "open google")!;
+    const midScore = fuzzyScore("go", "open google")!;
+    // "op" starts at index 0 and gets start-of-string bonus; "go" starts at word boundary
+    expect(startScore).toBeGreaterThan(midScore);
+  });
+
+  it("returns null when pattern is longer than text", () => {
+    expect(fuzzyScore("abcdef", "abc")).toBeNull();
+  });
+
+  it("matches single character", () => {
+    expect(fuzzyScore("g", "Google")).not.toBeNull();
+  });
+
+  it("matches full string exactly", () => {
+    const score = fuzzyScore("gmail", "Gmail");
+    expect(score).not.toBeNull();
+    expect(score).toBeGreaterThan(0);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════
+// fuzzyFilterListItems
+// ═══════════════════════════════════════════════════════════════════════
+describe("fuzzyFilterListItems", () => {
+  const items = [
+    { title: "Gmail", subtext: "Google Mail" },
+    { title: "Outlook", subtext: "Microsoft Outlook" },
+    { title: "Apple Mail" },
+    { title: "Yahoo Mail", subtext: "yahoo.com" },
+  ];
+
+  it("returns all items for empty filter", () => {
+    expect(fuzzyFilterListItems(items, "")).toEqual(items);
+  });
+
+  it("filters to matching items only", () => {
+    const result = fuzzyFilterListItems(items, "gm");
+    const titles = result.map(it => it.title);
+    expect(titles).toContain("Gmail");
+    expect(titles).not.toContain("Outlook");
+  });
+
+  it("matches against subtext when title does not match", () => {
+    // "micro" matches "Microsoft Outlook" in subtext
+    const result = fuzzyFilterListItems(items, "micro");
+    expect(result.map(it => it.title)).toContain("Outlook");
+  });
+
+  it("sorts by descending score", () => {
+    // "mail" should match Gmail, Apple Mail, Yahoo Mail; Gmail should score highest
+    // because "mail" is consecutive in "Gmail" starting at index 1
+    const result = fuzzyFilterListItems(items, "mail");
+    expect(result.length).toBeGreaterThanOrEqual(3);
+    // All mail items should be present
+    const titles = result.map(it => it.title);
+    expect(titles).toContain("Gmail");
+    expect(titles).toContain("Apple Mail");
+    expect(titles).toContain("Yahoo Mail");
+  });
+
+  it("returns empty array when nothing matches", () => {
+    expect(fuzzyFilterListItems(items, "zzz")).toEqual([]);
+  });
+
+  it("is case-insensitive", () => {
+    const lower = fuzzyFilterListItems(items, "gmail");
+    const upper = fuzzyFilterListItems(items, "GMAIL");
+    expect(lower.map(it => it.title)).toEqual(upper.map(it => it.title));
+  });
+
+  it("handles items without subtext", () => {
+    const result = fuzzyFilterListItems(items, "apple");
+    expect(result.map(it => it.title)).toContain("Apple Mail");
   });
 });

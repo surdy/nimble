@@ -73,6 +73,18 @@ action:
 
 For `optional` and `required` modes the script is re-invoked as the user types, with a 200 ms debounce to prevent excessive calls. For how to use arguments inside a script, see [Writing Scripts](../guides/writing-scripts.md#accepting-an-argument).
 
+### Locking the arg for client-side fuzzy filtering (`arg: required`)
+
+For `arg: required` commands the suffix you type *is* the script's argument, so every keystroke re-runs the script. If you want to **stop re-invoking** and instead fuzzy-filter the results that have already come back, press <kbd>Tab</kbd> (or <kbd>→</kbd> when the cursor is at the end of the input) once the list has loaded. Nimble:
+
+1. Locks the current suffix as the script's arg.
+2. Appends a space so you can immediately start typing a filter.
+3. Treats anything you type after the locked arg as a client-side fuzzy filter over the already-returned results — no further script invocations.
+
+To release the lock, backspace through the locked text. Releasing the lock re-enables live re-invocation as you keep typing.
+
+This is useful for scripts that perform expensive lookups (e.g., a remote search) where you want a fast, local narrowing pass once the initial results are on screen.
+
 ---
 
 ## `item_action`

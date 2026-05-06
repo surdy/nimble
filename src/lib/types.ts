@@ -156,4 +156,6 @@ export interface CommandFileMeta {
   file_path: string;
   /** Relative directory containing the YAML file (empty string for root-level commands). */
   source_dir: string;
+  /** File modification time as Unix timestamp in seconds (0 if unavailable). */
+  modified: number;
 }

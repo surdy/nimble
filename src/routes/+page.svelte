@@ -4,7 +4,7 @@
   import { getCurrentWindow, LogicalSize } from "@tauri-apps/api/window";
   import { listen, emit } from "@tauri-apps/api/event";
   import type { Action, AppSettings, Command, CommandFileMeta, CommandsPayload, CommandWarning, DuplicateWarning, ListItem, ReservedPhraseWarning, SkippedFileWarning } from "$lib/types";
-  import { actionBadge, highlight, eventToShortcut, shortenPath, filterCommands, isParamMode, computeEffectiveInput } from "$lib/helpers";
+  import { actionBadge, highlight, eventToShortcut, shortenPath, filterCommands, isParamMode, computeEffectiveInput, fuzzyFilterListItems } from "$lib/helpers";
 
   // ── State ──────────────────────────────────────────────────────────────
   let input = $state("");
@@ -128,27 +128,30 @@
       c.title.toLowerCase().includes(cmdFilter.toLowerCase())
     )
   );
-  // Group filtered commands by source_dir for sidebar folder view
+  // Group filtered commands by the active cmdGroupBy mode
   const cmdGroupedList = $derived(() => {
     const groups: { folder: string; label: string; items: CommandFileMeta[] }[] = [];
+    if (cmdGroupBy === "none") {
+      // Flat list — single group with all items sorted
+      const sorted = [...cmdFilteredList].sort(cmdSortCompare);
+      groups.push({ folder: "__all__", label: "All Commands", items: sorted });
+      return groups;
+    }
     const map = new Map<string, CommandFileMeta[]>();
     for (const c of cmdFilteredList) {
-      const key = c.source_dir || "";
+      const key = cmdGroupBy === "type" ? c.action_type : (c.source_dir || "");
       if (!map.has(key)) map.set(key, []);
       map.get(key)!.push(c);
     }
-    // Sort folders: root first, then alphabetically
     const keys = [...map.keys()].sort((a, b) => {
       if (a === "" && b !== "") return -1;
       if (a !== "" && b === "") return 1;
       return a.localeCompare(b);
     });
     for (const key of keys) {
-      groups.push({
-        folder: key,
-        label: key || "Commands",
-        items: map.get(key)!,
-      });
+      const label = cmdGroupBy === "type" ? key.replace(/_/g, " ") : (key || "Commands");
+      const items = [...map.get(key)!].sort(cmdSortCompare);
+      groups.push({ folder: key, label, items });
     }
     return groups;
   });
@@ -173,6 +176,177 @@
       : false)
   );
   const CMD_EDITABLE_TYPES = new Set(["open_url", "paste_text", "copy_text", "static_list", "dynamic_list", "script_action"]);
+  // ── Table-view state ────────────────────────────────────────────────
+  let cmdEditingMode = $state(false);  // false = table list, true = detail form
+  let cmdCtxMenu = $state<{ x: number; y: number; meta: CommandFileMeta } | null>(null);
+  let cmdGroupBy = $state<"none" | "folder" | "type">("none");
+  let cmdSortCol = $state<"phrase" | "title" | "action" | "modified">("phrase");
+  let cmdSortAsc = $state(true);
+  // Bulk-select state
+  let cmdBulkSelected = $state<Set<string>>(new Set());
+  let cmdBulkDeleteConfirm = $state(false);
+  const cmdBulkCount = $derived(cmdBulkSelected.size);
+  const cmdBulkAllSelected = $derived(
+    cmdFilteredList.length > 0 && cmdFilteredList.every(c => cmdBulkSelected.has(c.file_path))
+  );
+  // Settings sidebar nav
+  let settingsActiveNav = $state("keyboard");
+  // Restore Defaults confirmation
+  let settingsRestoreConfirm = $state(false);
+  /** Switch from table list to detail editor for a command. */
+  function cmdOpenEditor(meta: CommandFileMeta) {
+    cmdSelectItem(meta);
+    cmdEditingMode = true;
+  }
+  /** Return from detail editor to the table list. */
+  function cmdCloseEditor() {
+    cmdEditingMode = false;
+    cmdIsNew = false;
+  }
+  /** Start creating a new command (opens editor). */
+  function cmdStartNewFromTable() {
+    cmdStartNew();
+    cmdEditingMode = true;
+  }
+
+  /** Icon glyph for each action type. */
+  function actionIcon(type: string): string {
+    switch (type) {
+      case "open_url":       return "🔗";
+      case "paste_text":     return "📋";
+      case "copy_text":      return "⧉";
+      case "static_list":    return "≣";
+      case "dynamic_list":   return "⚡";
+      case "script_action":  return "▶";
+      default:               return "•";
+    }
+  }
+
+  /** Get load-time warning for a specific command file, if any. */
+  function cmdWarningForFile(meta: CommandFileMeta): string | null {
+    const relPath = meta.file_path;
+    const cw = commandWarnings.find(w => relPath.endsWith(w.file));
+    if (cw) return cw.message;
+    const sw = skippedWarnings.find(w => relPath.endsWith(w.file));
+    if (sw) return sw.reason;
+    return null;
+  }
+
+  /** Count disabled commands in a group. */
+  function cmdDisabledCount(items: CommandFileMeta[]): number {
+    return items.filter(c => !c.enabled).length;
+  }
+
+  /** Format a Unix timestamp as relative time (e.g. "2d ago", "3w ago"). */
+  function relativeTime(ts: number): string {
+    if (!ts) return "—";
+    const now = Date.now() / 1000;
+    const diff = Math.max(0, now - ts);
+    if (diff < 60) return "just now";
+    if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
+    if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
+    if (diff < 604800) return `${Math.floor(diff / 86400)}d ago`;
+    if (diff < 2592000) return `${Math.floor(diff / 604800)}w ago`;
+    return `${Math.floor(diff / 2592000)}mo ago`;
+  }
+
+  /** Toggle sort: if same column, flip direction; otherwise sort ascending on new column. */
+  function cmdToggleSort(col: "phrase" | "title" | "action" | "modified") {
+    if (cmdSortCol === col) {
+      cmdSortAsc = !cmdSortAsc;
+    } else {
+      cmdSortCol = col;
+      cmdSortAsc = col === "modified" ? false : true; // modified defaults descending
+    }
+  }
+
+  /** Sort comparator for the current column. */
+  function cmdSortCompare(a: CommandFileMeta, b: CommandFileMeta): number {
+    let cmp = 0;
+    switch (cmdSortCol) {
+      case "phrase": cmp = a.phrase.localeCompare(b.phrase); break;
+      case "title": cmp = a.title.localeCompare(b.title); break;
+      case "action": cmp = a.action_type.localeCompare(b.action_type); break;
+      case "modified": cmp = a.modified - b.modified; break;
+    }
+    return cmdSortAsc ? cmp : -cmp;
+  }
+  /** Toggle a command's enabled state directly from the table row. */
+  async function cmdToggleEnabled(meta: CommandFileMeta, newEnabled: boolean) {
+    try {
+      const result = await invoke<{ commands: import("$lib/types").Command[] }>("list_commands");
+      const full = result.commands.find(c => c.phrase.toLowerCase() === meta.phrase.toLowerCase());
+      if (!full) return;
+      let configJson: string;
+      if (full.action.type === "open_url") configJson = JSON.stringify(full.action.config);
+      else if (full.action.type === "paste_text" || full.action.type === "copy_text") configJson = JSON.stringify(full.action.config);
+      else if (full.action.type === "static_list") configJson = JSON.stringify(full.action.config);
+      else if (full.action.type === "dynamic_list") configJson = JSON.stringify(full.action.config);
+      else configJson = JSON.stringify(full.action.config);
+      await invoke("save_command_file", {
+        phrase: meta.phrase,
+        title: meta.title,
+        enabled: newEnabled,
+        actionType: full.action.type,
+        configJson,
+        filePath: meta.file_path,
+      });
+      await cmdRefreshList();
+    } catch (err) {
+      console.error("Failed to toggle enabled:", err);
+    }
+  }
+
+  /** Toggle bulk-select checkbox for a single row. */
+  function cmdBulkToggle(filePath: string) {
+    const next = new Set(cmdBulkSelected);
+    if (next.has(filePath)) next.delete(filePath); else next.add(filePath);
+    cmdBulkSelected = next;
+  }
+
+  /** Toggle select-all checkbox. */
+  function cmdBulkToggleAll() {
+    if (cmdBulkAllSelected) {
+      cmdBulkSelected = new Set();
+    } else {
+      cmdBulkSelected = new Set(cmdFilteredList.map(c => c.file_path));
+    }
+  }
+
+  /** Clear bulk selection. */
+  function cmdBulkClear() {
+    cmdBulkSelected = new Set();
+    cmdBulkDeleteConfirm = false;
+  }
+
+  /** Bulk enable/disable all selected commands. */
+  async function cmdBulkSetEnabled(enabled: boolean) {
+    const items = cmdList.filter(c => cmdBulkSelected.has(c.file_path));
+    for (const meta of items) {
+      await cmdToggleEnabled(meta, enabled);
+    }
+    cmdBulkClear();
+    await cmdRefreshList();
+  }
+
+  /** Bulk delete all selected commands (must confirm first). */
+  async function cmdBulkDelete() {
+    if (!cmdBulkDeleteConfirm) { cmdBulkDeleteConfirm = true; return; }
+    const paths = [...cmdBulkSelected];
+    for (const fp of paths) {
+      try { await invoke("delete_command_file", { filePath: fp }); } catch {}
+    }
+    cmdBulkClear();
+    cmdSelectedFile = null;
+    await cmdRefreshList();
+  }
+
+  /** Scroll the settings content to a section. */
+  function settingsScrollTo(sectionId: string) {
+    settingsActiveNav = sectionId;
+    const el = document.getElementById(`settings-section-${sectionId}`);
+    if (el) el.scrollIntoView({ behavior: "smooth", block: "start" });
+  }
 
   // Debug mode — toggled via /debug command, resets on app restart
   let debugMode = $state(false);
@@ -271,6 +445,33 @@
   let actionError = $state<string | null>(null);
   let resultsEl: HTMLDivElement | undefined = $state();
 
+  // Fuzzy filter state: unfiltered results from script/list, and the phrase they belong to.
+  // After a list loads, further typing fuzzy-filters `fullListItems` into `listItems`.
+  let fullListItems = $state<ListItem[]>([]);
+  let listLoadedPhrase = $state<string | null>(null); // tracks which command phrase the list was loaded for
+  let scriptInvokedArg = $state(""); // the arg passed to the script (for arg:required); fuzzy filter is relative to this
+
+  // For arg:required dynamic_list: when non-null, the user has pressed Tab/→
+  // to "commit" this string as the script's arg. Subsequent typing after
+  // `committedArg + " "` is treated as a client-side fuzzy filter rather than
+  // a new arg (no script re-invocation). Backspacing past the committed arg
+  // releases the lock and re-enables live re-invocation.
+  let committedArg = $state<string | null>(null);
+
+  // Auto-release the lock whenever we leave a dynamic_list arg:required match.
+  $effect(() => {
+    if (
+      committedArg !== null &&
+      (
+        !activeListCmd ||
+        activeListCmd.action.type !== "dynamic_list" ||
+        (activeListCmd.action.config.arg ?? "none") !== "required"
+      )
+    ) {
+      committedArg = null;
+    }
+  });
+
   // ── Filtering & navigation ─────────────────────────────────────────────
   const MAX_RESULTS = 8;
   const ROW_H = 56; // px per result row
@@ -299,10 +500,12 @@
 
   // True when the typed input matches a list command and we should show list UI.
   // Includes the empty-resolved state for dynamic lists ("No results" feedback),
-  // and the in-progress state while the script is executing.
+  // the in-progress state while the script is executing,
+  // and when fuzzy filtering produces zero matches (show "No matches for filter").
   const showingList = $derived(
     activeListCmd !== null && (
       listItems.length > 0 ||
+      fullListItems.length > 0 ||
       (activeListCmd.action.type === "dynamic_list" && (dynamicListLoaded || scriptLoadingState !== "idle"))
     )
   );
@@ -330,20 +533,65 @@
   $effect(() => {
     const typed = effectiveInput.toLowerCase();
 
-    // ── static_list: exact match only ─────────────────────────────────
+    // ── static_list: exact match or prefix (phrase + space + filter) ───
     const staticMatch = commands.find(
       cmd => cmd.action.type === "static_list" && cmd.phrase.toLowerCase() === typed
     ) ?? null;
 
-    if (staticMatch && staticMatch.action.type === "static_list") {
-      const listName = staticMatch.action.config.list;
-      const commandDir = staticMatch.source_dir;
-      activeListCmd = staticMatch;
-      invoke<ListItem[]>("load_list", { commandDir, listName, inlineEnv: staticMatch.env, context: activeContext, phrase: staticMatch.phrase })
-        .then(items => { listItems = items; selectedIndex = 0; })
-        .catch((err) => {
-          listItems = [{ title: "⚠️ Error loading list", subtext: String(err) }];
-        });
+    // Also detect prefix match for static list filtering (phrase + space + extra text)
+    const staticPrefixMatch = staticMatch ? null : (
+      commands.find(cmd => {
+        if (cmd.action.type !== "static_list") return false;
+        return typed.startsWith(cmd.phrase.toLowerCase() + " ");
+      }) ?? null
+    );
+
+    const staticCmd = staticMatch ?? staticPrefixMatch;
+
+    if (staticCmd && staticCmd.action.type === "static_list") {
+      const phrase = staticCmd.phrase.toLowerCase();
+
+      if (staticMatch) {
+        // Exact match — load the list (or use cached if already loaded for this phrase)
+        if (listLoadedPhrase !== phrase) {
+          const listName = staticCmd.action.config.list;
+          const commandDir = staticCmd.source_dir;
+          activeListCmd = staticCmd;
+          listLoadedPhrase = phrase;
+          invoke<ListItem[]>("load_list", { commandDir, listName, inlineEnv: staticCmd.env, context: activeContext, phrase: staticCmd.phrase })
+            .then(items => { fullListItems = items; listItems = items; selectedIndex = 0; })
+            .catch((err) => {
+              fullListItems = [];
+              listItems = [{ title: "⚠️ Error loading list", subtext: String(err) }];
+            });
+        } else {
+          // Already loaded — show unfiltered
+          listItems = fullListItems;
+          selectedIndex = 0;
+          activeListCmd = staticCmd;
+        }
+      } else {
+        // Prefix match — fuzzy-filter the already-loaded list
+        if (listLoadedPhrase === phrase && fullListItems.length > 0) {
+          const suffix = typed.slice(phrase.length + 1).trim();
+          activeListCmd = staticCmd;
+          listItems = fuzzyFilterListItems(fullListItems, suffix);
+          selectedIndex = 0;
+        } else {
+          // List not loaded yet — load it first, then filter
+          const listName = staticCmd.action.config.list;
+          const commandDir = staticCmd.source_dir;
+          activeListCmd = staticCmd;
+          listLoadedPhrase = phrase;
+          const suffix = typed.slice(phrase.length + 1).trim();
+          invoke<ListItem[]>("load_list", { commandDir, listName, inlineEnv: staticCmd.env, context: activeContext, phrase: staticCmd.phrase })
+            .then(items => { fullListItems = items; listItems = fuzzyFilterListItems(items, suffix); selectedIndex = 0; })
+            .catch((err) => {
+              fullListItems = [];
+              listItems = [{ title: "⚠️ Error loading list", subtext: String(err) }];
+            });
+        }
+      }
       return;
     }
 
@@ -387,12 +635,88 @@
         }
       }
 
+      // For arg:none and arg:optional: if results are already loaded for this
+      // phrase, fuzzy-filter client-side instead of re-invoking the script.
+      // For arg:required, the suffix IS the script's arg — we must re-invoke
+      // when the suffix changes (handled below).
+      if (argMode !== "required" && listLoadedPhrase === phrase && dynamicListLoaded) {
+        activeListCmd = dynMatch;
+        listItems = fuzzyFilterListItems(fullListItems, suffix);
+        selectedIndex = 0;
+        return;
+      }
+
+      // For arg:required, decide what is the "effective arg" sent to the
+      // script vs the client-side fuzzy filter applied on top of cached
+      // results. When committedArg is set, the suffix is split:
+      //   <committedArg> [<filter text>]
+      // and the script is NOT re-invoked while the locked prefix matches.
+      let requiredArg = suffix;
+      let requiredFilter = "";
+      if (argMode === "required" && committedArg !== null) {
+        if (suffix === committedArg) {
+          requiredArg = committedArg;
+          requiredFilter = "";
+        } else if (suffix.startsWith(committedArg + " ")) {
+          requiredArg = committedArg;
+          requiredFilter = suffix.slice(committedArg.length + 1).trim();
+        } else {
+          // Backspaced past (or diverged from) the locked arg — release it
+          // and treat the new suffix as a fresh script arg. Mutating state
+          // here re-triggers this $effect, which will re-enter and take
+          // the unlocked path below.
+          committedArg = null;
+          return;
+        }
+      }
+
+      // For arg:required, if the script has already been invoked for the
+      // effective arg, just fuzzy-filter the cached results.
+      if (
+        argMode === "required" &&
+        listLoadedPhrase === phrase &&
+        dynamicListLoaded &&
+        scriptInvokedArg === requiredArg
+      ) {
+        activeListCmd = dynMatch;
+        listItems = requiredFilter
+          ? fuzzyFilterListItems(fullListItems, requiredFilter)
+          : fullListItems;
+        selectedIndex = 0;
+        return;
+      }
+
+      // For arg:required, if a script is currently running for the effective
+      // arg, wait for it to resolve.
+      if (
+        argMode === "required" &&
+        listLoadedPhrase === phrase &&
+        scriptLoadingState !== "idle" &&
+        scriptInvokedArg === requiredArg
+      ) {
+        activeListCmd = dynMatch;
+        return;
+      }
+
+      // If a script is already running for this phrase (and the suffix hasn't
+      // changed for arg:required), wait for the promise to resolve.
+      // (runDynamic sets listLoadedPhrase and scriptLoadingState synchronously,
+      // which re-triggers this $effect; without this guard, the fall-through
+      // would schedule another invocation.)
+      if (argMode !== "required" && listLoadedPhrase === phrase && scriptLoadingState !== "idle") {
+        activeListCmd = dynMatch;
+        return;
+      }
+
+      // Script not yet invoked for this phrase — decide whether to invoke now.
       let timer: ReturnType<typeof setTimeout> | null = null;
 
       const commandDir = dynMatch.source_dir;
 
       const runDynamic = (arg: string | null) => {
         dynamicListLoaded = false;
+        listLoadedPhrase = phrase;
+        scriptInvokedArg = arg ?? "";
         scriptLoadingState = "running";
         let slowTimer = setTimeout(() => { scriptLoadingState = "slow"; }, 2000);
         let verySlowTimer = setTimeout(() => { scriptLoadingState = "very_slow"; }, 4000);
@@ -400,18 +724,43 @@
           .then(items => {
             clearTimeout(slowTimer); clearTimeout(verySlowTimer);
             scriptLoadingState = "idle";
-            listItems = items; selectedIndex = 0; dynamicListLoaded = true;
+            fullListItems = items;
+            dynamicListLoaded = true;
+            // For arg:required, the script's results are already filtered by
+            // the arg — apply client-side fuzzy filtering only if the user
+            // has committed an arg (locked) and is now typing extra filter
+            // text after it. For arg:none/optional, always fuzzy-filter using
+            // the current suffix.
+            if (argMode === "required") {
+              const currentTyped = effectiveInput.toLowerCase();
+              const currentSuffix = currentTyped.startsWith(phrase + " ") ? currentTyped.slice(phrase.length + 1).trim() : "";
+              let filterText = "";
+              if (committedArg !== null) {
+                if (currentSuffix === committedArg) {
+                  filterText = "";
+                } else if (currentSuffix.startsWith(committedArg + " ")) {
+                  filterText = currentSuffix.slice(committedArg.length + 1).trim();
+                }
+              }
+              listItems = filterText ? fuzzyFilterListItems(items, filterText) : items;
+            } else {
+              const currentTyped = effectiveInput.toLowerCase();
+              const currentSuffix = currentTyped.startsWith(phrase + " ") ? currentTyped.slice(phrase.length + 1).trim() : "";
+              listItems = fuzzyFilterListItems(items, currentSuffix);
+            }
+            selectedIndex = 0;
           })
           .catch((err) => {
             clearTimeout(slowTimer); clearTimeout(verySlowTimer);
             scriptLoadingState = "idle";
+            fullListItems = [];
             listItems = [{ title: "⚠️ Script error", subtext: String(err) }];
             dynamicListLoaded = true;
           });
       };
 
       if (argMode === "none") {
-        if (isExact) {
+        if (isExact || suffix !== "") {
           activeListCmd = dynMatch;
           runDynamic(null);
         } else {
@@ -422,16 +771,15 @@
         }
       } else if (argMode === "optional") {
         activeListCmd = dynMatch;
-        if (isExact) {
-          runDynamic(null);
-        } else {
-          timer = setTimeout(() => runDynamic(suffix), 200);
-        }
+        runDynamic(null);
       } else {
-        // required: only invoke when suffix is non-empty
-        if (suffix) {
+        // required: only invoke when the effective arg is non-empty.
+        // (When committedArg is set, requiredArg === committedArg and the
+        // earlier cache/in-flight guards usually short-circuit before here.)
+        if (requiredArg) {
           activeListCmd = dynMatch;
-          timer = setTimeout(() => runDynamic(suffix), 200);
+          const argToRun = requiredArg;
+          timer = setTimeout(() => runDynamic(argToRun), 200);
         } else {
           activeListCmd = null;
           listItems = [];
@@ -443,9 +791,12 @@
       return () => { if (timer !== null) clearTimeout(timer); };
     }
 
-    // No list match
+    // No list match — reset everything including fuzzy filter state
     activeListCmd = null;
     listItems = [];
+    fullListItems = [];
+    listLoadedPhrase = null;
+    scriptInvokedArg = "";
     dynamicListLoaded = false;
     scriptLoadingState = "idle";
     showingDebugLog = false;
@@ -1123,6 +1474,40 @@ echo "Hello, world!"
   }
 
   // ── Launcher key handling ──────────────────────────────────────────────
+
+  /**
+   * Commit the current suffix as the locked arg for an arg:required
+   * dynamic_list. Returns true when a commit happened (so the caller can
+   * stop further key handling).
+   *
+   * Preconditions:
+   *  - active match is a dynamic_list with `arg: required`
+   *  - the script has resolved at least once for the current suffix
+   *  - no arg is currently locked
+   *  - the current suffix is non-empty
+   *
+   * On commit, a trailing space is appended to the input so the user can
+   * immediately start typing the fuzzy filter.
+   */
+  function tryCommitRequiredArg(): boolean {
+    if (!activeListCmd) return false;
+    if (activeListCmd.action.type !== "dynamic_list") return false;
+    if ((activeListCmd.action.config.arg ?? "none") !== "required") return false;
+    if (!dynamicListLoaded) return false;
+    if (committedArg !== null) return false;
+
+    const phrase = activeListCmd.phrase.toLowerCase();
+    const typed = effectiveInput.toLowerCase();
+    const suffix = typed.startsWith(phrase + " ") ? typed.slice(phrase.length + 1).trim() : "";
+    if (!suffix) return false;
+    // Don't commit while results are still in flight for a different arg.
+    if (scriptInvokedArg !== suffix) return false;
+
+    committedArg = suffix;
+    if (!input.endsWith(" ")) input = input + " ";
+    return true;
+  }
+
   function handleKeydown(e: KeyboardEvent) {
     if (onboarding) return; // handled by the onboarding div
     if (showSettings) { handleSettingsKeydown(e); return; }
@@ -1131,6 +1516,7 @@ echo "Hello, world!"
       if (activePreferencesTab === "commands") {
         if (mod && e.key === "n") { e.preventDefault(); cmdStartNew(); return; }
         if (mod && e.key === "s") { e.preventDefault(); cmdSave(); return; }
+        if (e.key === "Escape" && cmdBulkCount > 0) { e.preventDefault(); cmdBulkClear(); return; }
       }
       if (e.key === "Escape") { e.preventDefault(); appWindow.close(); return; }
       return;
@@ -1157,7 +1543,12 @@ echo "Hello, world!"
       }
     } else if (e.key === "Tab") {
       e.preventDefault();
-      // Tab autocompletes to the longest partially-matched phrase.
+      // 1) Commit-arg shortcut for arg:required dynamic_list — freeze the
+      //    current suffix as the script's arg and switch further typing into
+      //    client-side fuzzy filtering.
+      if (tryCommitRequiredArg()) return;
+
+      // 2) Otherwise: Tab autocompletes to the longest partially-matched phrase.
       // Only considers commands whose phrase starts with what the user typed
       // but isn't fully typed yet (i.e. partial phrase matches, not param mode).
       const typed = effectiveInput.toLowerCase();
@@ -1170,6 +1561,17 @@ echo "Hello, world!"
         .sort((a, b) => b.phrase.length - a.phrase.length);
       if (candidates.length > 0) {
         input = candidates[0].phrase;
+      }
+    } else if (e.key === "ArrowRight") {
+      // Commit-arg shortcut — only when the cursor is at the end of the input
+      // so normal cursor movement is preserved when editing mid-string.
+      if (
+        inputEl &&
+        inputEl.selectionStart === input.length &&
+        inputEl.selectionEnd === input.length &&
+        tryCommitRequiredArg()
+      ) {
+        e.preventDefault();
       }
     }
   }
@@ -1275,12 +1677,17 @@ echo "Hello, world!"
         skippedWarnings = event.payload.skipped ?? [];
         commandWarnings = event.payload.warnings ?? [];
         warningsDismissed = false; // always surface new warnings
+        // Invalidate cached list results so the main $effect re-invokes the script/list
+        fullListItems = [];
+        listLoadedPhrase = null;
+        scriptInvokedArg = "";
         // If a list is currently displayed, refresh it in case its file changed
         if (activeListCmd && activeListCmd.action.type === "static_list") {
           const listName = activeListCmd.action.config.list;
           const commandDir = activeListCmd.source_dir;
+          const phrase = activeListCmd.phrase.toLowerCase();
           invoke<ListItem[]>("load_list", { commandDir, listName, inlineEnv: activeListCmd.env, context: activeContext, phrase: activeListCmd.phrase })
-            .then(items => { listItems = items; })
+            .then(items => { fullListItems = items; listLoadedPhrase = phrase; listItems = items; })
             .catch((err) => { listItems = [{ title: "⚠️ Error loading list", subtext: String(err) }]; });
         } else if (activeListCmd && activeListCmd.action.type === "dynamic_list") {
           const config = activeListCmd.action.config;
@@ -1288,7 +1695,7 @@ echo "Hello, world!"
           const phrase = activeListCmd.phrase.toLowerCase();
           const suffix = typed.startsWith(phrase + " ") ? typed.slice(phrase.length + 1).trim() : "";
           invoke<ListItem[]>("run_dynamic_list", { commandDir: activeListCmd.source_dir, scriptName: config.script, arg: suffix || null, context: activeContext, phrase: activeListCmd.phrase, inlineEnv: activeListCmd.env })
-            .then(items => { listItems = items; })
+            .then(items => { fullListItems = items; listLoadedPhrase = phrase; listItems = items; dynamicListLoaded = true; })
             .catch((err) => { listItems = [{ title: "⚠️ Script error", subtext: String(err) }]; });
         }
       });
@@ -1403,67 +1810,250 @@ echo "Hello, world!"
     {/if}
 
     <div class="cmd-editor">
-      <!-- sidebar -->
-      <div class="cmd-sidebar">
-        <div class="cmd-sidebar-header">
-          <input
-            class="cmd-filter"
-            type="text"
-            placeholder="Filter…"
-            bind:value={cmdFilter}
-            autocomplete="off"
-            autocorrect="off"
-            spellcheck="false"
-          />
-          <!-- svelte-ignore a11y_consider_explicit_label -->
-          <button class="cmd-new-btn" title="New command (⌘N)" onclick={cmdStartNew}>＋</button>
+      {#if !cmdEditingMode}
+      <!-- ═══ TABLE VIEW ═══ -->
+      <!-- Toolbar -->
+      <div class="cmd-toolbar">
+        <div class="cmd-toolbar-left">
+          <button class="cmd-tb-btn cmd-tb-btn-primary" onclick={cmdStartNewFromTable}>
+            <span class="cmd-tb-icon">+</span> New <span class="cmd-tb-kbd">⌘N</span>
+          </button>
+          <div class="cmd-tb-separator"></div>
+          <button class="cmd-tb-btn" disabled={!cmdSelectedFile} onclick={() => { const m = cmdList.find(c => c.file_path === cmdSelectedFile); if (m) cmdOpenEditor(m); }}>
+            <span class="cmd-tb-icon">✎</span> Edit <span class="cmd-tb-kbd">⏎</span>
+          </button>
+          <button class="cmd-tb-btn cmd-tb-btn-danger" disabled={!cmdSelectedFile} onclick={() => { const m = cmdList.find(c => c.file_path === cmdSelectedFile); if (m) { cmdSelectItem(m); cmdDeleteConfirm = true; cmdEditingMode = true; } }}>
+            <span class="cmd-tb-icon">✕</span> Delete <span class="cmd-tb-kbd">⌫</span>
+          </button>
+          <div class="cmd-tb-separator"></div>
+          <div class="cmd-seg-group">
+            <span class="cmd-seg-label">Group</span>
+            <button class="cmd-seg-btn" class:active={cmdGroupBy === "none"} onclick={() => cmdGroupBy = "none"}>None</button>
+            <button class="cmd-seg-btn" class:active={cmdGroupBy === "folder"} onclick={() => cmdGroupBy = "folder"}>Folder</button>
+            <button class="cmd-seg-btn" class:active={cmdGroupBy === "type"} onclick={() => cmdGroupBy = "type"}>Type</button>
+          </div>
         </div>
-        <div class="cmd-list" role="list">
-          {#if cmdFilteredList.length === 0}
-            <div class="cmd-list-empty">No commands yet.<br>Click ＋ to create one.</div>
-          {:else}
-            {#each cmdGroupedList() as group}
+        <div class="cmd-toolbar-right">
+          <div class="cmd-search-wrapper">
+            <input
+              type="text"
+              class="cmd-search-box"
+              placeholder="Filter commands…"
+              bind:value={cmdFilter}
+              autocomplete="off"
+              autocorrect="off"
+              spellcheck="false"
+            />
+          </div>
+        </div>
+      </div>
+
+      <!-- Bulk-action bar (visible when items are selected) -->
+      <div class="cmd-bulk-bar" class:visible={cmdBulkCount > 0}>
+        <span class="cmd-bulk-count">{cmdBulkCount} selected</span>
+        <div class="cmd-bulk-actions">
+          <button class="cmd-tb-btn" onclick={() => cmdBulkSetEnabled(true)}>Enable all</button>
+          <button class="cmd-tb-btn" onclick={() => cmdBulkSetEnabled(false)}>Disable all</button>
+          <button class="cmd-tb-btn cmd-tb-btn-danger" onclick={cmdBulkDelete}>
+            {cmdBulkDeleteConfirm ? 'Confirm delete?' : 'Delete all'}
+          </button>
+          <button class="cmd-tb-btn" onclick={cmdBulkClear}>Clear selection</button>
+        </div>
+      </div>
+
+      <!-- Column header -->
+      <!-- svelte-ignore a11y_click_events_have_key_events -->
+      <!-- svelte-ignore a11y_no_static_element_interactions -->
+      <div class="cmd-col-header">
+        <span class="cmd-col-check"><input type="checkbox" class="cmd-bulk-header-cb" checked={cmdBulkAllSelected} onchange={cmdBulkToggleAll} /></span>
+        <span class="cmd-col-sortable" class:sorted={cmdSortCol === 'phrase'} onclick={() => cmdToggleSort('phrase')}>
+          Phrase {cmdSortCol === 'phrase' ? (cmdSortAsc ? '▲' : '▼') : ''}
+        </span>
+        <span class="cmd-col-sortable" class:sorted={cmdSortCol === 'title'} onclick={() => cmdToggleSort('title')}>
+          Title {cmdSortCol === 'title' ? (cmdSortAsc ? '▲' : '▼') : ''}
+        </span>
+        <span class="cmd-col-sortable" class:sorted={cmdSortCol === 'action'} onclick={() => cmdToggleSort('action')}>
+          Action {cmdSortCol === 'action' ? (cmdSortAsc ? '▲' : '▼') : ''}
+        </span>
+        <span class="cmd-col-sortable" class:sorted={cmdSortCol === 'modified'} onclick={() => cmdToggleSort('modified')}>
+          Modified {cmdSortCol === 'modified' ? (cmdSortAsc ? '▲' : '▼') : ''}
+        </span>
+        <span class="cmd-col-center">On</span>
+      </div>
+
+      <!-- Table body -->
+      <!-- svelte-ignore a11y_no_static_element_interactions -->
+      <div class="cmd-table-container" oncontextmenu={(e) => e.preventDefault()}>
+        {#if cmdFilteredList.length === 0}
+          <div class="cmd-table-empty">
+            <div class="cmd-empty-icon">📂</div>
+            <div class="cmd-empty-title">No commands yet</div>
+            <div class="cmd-empty-desc">Create your first command to get started with Nimble.</div>
+            <div class="cmd-empty-actions">
+              <button class="cmd-tb-btn cmd-tb-btn-primary" onclick={cmdStartNewFromTable}>
+                <span class="cmd-tb-icon">+</span> New Command
+              </button>
+            </div>
+          </div>
+        {:else}
+          {#each cmdGroupedList() as group}
+            {#if cmdGroupBy !== "none"}
+            <div class="cmd-folder-group">
               <button
-                class="cmd-folder-header"
+                class="cmd-tbl-folder-header"
                 onclick={() => {
                   const next = new Set(cmdCollapsedFolders);
                   next.has(group.folder) ? next.delete(group.folder) : next.add(group.folder);
                   cmdCollapsedFolders = next;
                 }}
               >
-                <span class="cmd-folder-toggle">{cmdCollapsedFolders.has(group.folder) ? '+' : '−'}</span>
-                <span class="cmd-folder-name">{group.label}</span>
-                <span class="cmd-folder-count">{group.items.length}</span>
+                <span class="cmd-tbl-chevron" class:collapsed={cmdCollapsedFolders.has(group.folder)}>▼</span>
+                {#if cmdGroupBy === "folder"}
+                  <svg class="cmd-tbl-folder-svg" width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M1.5 3a1 1 0 011-1h3.59a1 1 0 01.7.29l1 1A1 1 0 008.5 3.6h6a1 1 0 011 1v8a1 1 0 01-1 1h-13a1 1 0 01-1-1V3z"/></svg>
+                {:else}
+                  <span class="cmd-tbl-group-icon">{actionIcon(group.folder)}</span>
+                {/if}
+                <span class="cmd-tbl-folder-name">{group.label}</span>
+                {#if cmdDisabledCount(group.items) > 0}
+                  <span class="cmd-tbl-folder-disabled">{cmdDisabledCount(group.items)} disabled</span>
+                {/if}
+                <span class="cmd-tbl-folder-count">{group.items.length} command{group.items.length === 1 ? '' : 's'}</span>
               </button>
               {#if !cmdCollapsedFolders.has(group.folder)}
                 {#each group.items as meta}
                   <!-- svelte-ignore a11y_click_events_have_key_events -->
                   <div
-                    class="cmd-list-item"
+                    class="cmd-tbl-row"
                     class:selected={meta.file_path === cmdSelectedFile}
-                    onclick={() => cmdSelectItem(meta)}
+                    class:disabled-row={!meta.enabled}
+                    class:checked={cmdBulkSelected.has(meta.file_path)}
+                    onclick={() => { cmdSelectedFile = meta.file_path; }}
+                    ondblclick={() => cmdOpenEditor(meta)}
+                    oncontextmenu={(e) => { e.preventDefault(); cmdSelectedFile = meta.file_path; cmdCtxMenu = { x: e.clientX, y: e.clientY, meta }; }}
+                    onkeydown={(e) => { if (e.key === 'Enter') cmdOpenEditor(meta); }}
                     role="option"
                     tabindex="0"
                     aria-selected={meta.file_path === cmdSelectedFile}
                   >
-                    <span class="cmd-item-phrase">{meta.phrase}</span>
-                    <span class="cmd-item-badge cmd-badge-{meta.action_type.replace('_', '-')}">{meta.action_type.replace('_', ' ')}</span>
+                    <span class="cmd-tbl-check-cell"><input type="checkbox" class="cmd-row-checkbox" checked={cmdBulkSelected.has(meta.file_path)} onclick={(e) => e.stopPropagation()} onchange={() => cmdBulkToggle(meta.file_path)} /></span>
+                    <span class="cmd-tbl-phrase">
+                      {meta.phrase}
+                      {#if cmdWarningForFile(meta)}
+                        <span class="cmd-tbl-status-warn" title={cmdWarningForFile(meta)}>⚠</span>
+                      {/if}
+                    </span>
+                    <span class="cmd-tbl-title">{meta.title}</span>
+                    <span><span class="cmd-tbl-badge cmd-tbl-badge-{meta.action_type}"><span class="cmd-tbl-badge-icon">{actionIcon(meta.action_type)}</span>{meta.action_type.replace(/_/g, ' ')}</span></span>
+                    <span class="cmd-tbl-modified">{relativeTime(meta.modified)}</span>
+                    <span class="cmd-tbl-toggle-cell">
+                      <!-- svelte-ignore a11y_label_has_associated_control -->
+                      <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+                      <label class="cmd-tbl-toggle" onclick={(e) => e.stopPropagation()}>
+                        <input type="checkbox" checked={meta.enabled} onchange={(e) => {
+                          const target = e.target as HTMLInputElement;
+                          cmdToggleEnabled(meta, target.checked);
+                        }} />
+                        <span class="cmd-tbl-toggle-track"></span>
+                        <span class="cmd-tbl-toggle-knob"></span>
+                      </label>
+                    </span>
                   </div>
                 {/each}
               {/if}
-            {/each}
-          {/if}
-        </div>
+            </div>
+            {:else}
+              <!-- No grouping — flat rows -->
+              {#each group.items as meta}
+                <!-- svelte-ignore a11y_click_events_have_key_events -->
+                <div
+                  class="cmd-tbl-row"
+                  class:selected={meta.file_path === cmdSelectedFile}
+                  class:disabled-row={!meta.enabled}
+                  class:checked={cmdBulkSelected.has(meta.file_path)}
+                  onclick={() => { cmdSelectedFile = meta.file_path; }}
+                  ondblclick={() => cmdOpenEditor(meta)}
+                  oncontextmenu={(e) => { e.preventDefault(); cmdSelectedFile = meta.file_path; cmdCtxMenu = { x: e.clientX, y: e.clientY, meta }; }}
+                  onkeydown={(e) => { if (e.key === 'Enter') cmdOpenEditor(meta); }}
+                  role="option"
+                  tabindex="0"
+                  aria-selected={meta.file_path === cmdSelectedFile}
+                >
+                  <span class="cmd-tbl-check-cell"><input type="checkbox" class="cmd-row-checkbox" checked={cmdBulkSelected.has(meta.file_path)} onclick={(e) => e.stopPropagation()} onchange={() => cmdBulkToggle(meta.file_path)} /></span>
+                  <span class="cmd-tbl-phrase">
+                    {meta.phrase}
+                    {#if cmdWarningForFile(meta)}
+                      <span class="cmd-tbl-status-warn" title={cmdWarningForFile(meta)}>⚠</span>
+                    {/if}
+                  </span>
+                  <span class="cmd-tbl-title">{meta.title}</span>
+                  <span><span class="cmd-tbl-badge cmd-tbl-badge-{meta.action_type}"><span class="cmd-tbl-badge-icon">{actionIcon(meta.action_type)}</span>{meta.action_type.replace(/_/g, ' ')}</span></span>
+                  <span class="cmd-tbl-modified">{relativeTime(meta.modified)}</span>
+                  <span class="cmd-tbl-toggle-cell">
+                    <!-- svelte-ignore a11y_label_has_associated_control -->
+                    <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+                    <label class="cmd-tbl-toggle" onclick={(e) => e.stopPropagation()}>
+                      <input type="checkbox" checked={meta.enabled} onchange={(e) => {
+                        const target = e.target as HTMLInputElement;
+                        cmdToggleEnabled(meta, target.checked);
+                      }} />
+                      <span class="cmd-tbl-toggle-track"></span>
+                      <span class="cmd-tbl-toggle-knob"></span>
+                    </label>
+                  </span>
+                </div>
+              {/each}
+            {/if}
+          {/each}
+        {/if}
       </div>
 
-      <!-- detail panel -->
-      <div class="cmd-detail">
-        {#if !cmdSelectedFile && !cmdIsNew}
-          <div class="cmd-empty-state">
-            <p>No command selected.</p>
-            <p>Pick one from the list, or click <strong>＋</strong> to create a new command.</p>
+      <!-- Status bar -->
+      <div class="cmd-statusbar">
+        <span>{cmdFilteredList.length} command{cmdFilteredList.length === 1 ? '' : 's'}{cmdFilter ? ' matching' : ''}{cmdGroupBy !== 'none' ? ` in ${cmdGroupedList().length} ${cmdGroupBy === 'folder' ? 'folder' : 'type'}${cmdGroupedList().length === 1 ? '' : 's'}` : ''}</span>
+        {#if (skippedWarnings.length + commandWarnings.length) > 0}
+          <span class="cmd-statusbar-pill-warn">⚠ {skippedWarnings.length + commandWarnings.length} issue{(skippedWarnings.length + commandWarnings.length) === 1 ? '' : 's'}</span>
+        {/if}
+        <span class="cmd-statusbar-right">
+          <kbd>↑↓</kbd> Navigate &nbsp; <kbd>⏎</kbd> Edit &nbsp;
+          <kbd>⌫</kbd> Delete &nbsp; <kbd>Right-click</kbd> More
+        </span>
+      </div>
+
+      <!-- Context menu -->
+      {#if cmdCtxMenu}
+        <!-- svelte-ignore a11y_click_events_have_key_events -->
+        <!-- svelte-ignore a11y_no_static_element_interactions -->
+        <div class="cmd-ctx-backdrop" onclick={() => cmdCtxMenu = null}>
+          <div class="cmd-ctx-menu" style="left:{cmdCtxMenu.x}px;top:{cmdCtxMenu.y}px" onclick={(e) => e.stopPropagation()}>
+            <button class="cmd-ctx-item" onclick={() => { cmdOpenEditor(cmdCtxMenu!.meta); cmdCtxMenu = null; }}>
+              <span class="cmd-ctx-icon">✎</span> Edit Command <span class="cmd-ctx-shortcut">⏎</span>
+            </button>
+            <div class="cmd-ctx-separator"></div>
+            <button class="cmd-ctx-item" onclick={() => { const m = cmdCtxMenu!.meta; cmdToggleEnabled(m, !m.enabled); cmdCtxMenu = null; }}>
+              <span class="cmd-ctx-icon">◉</span> {cmdCtxMenu.meta.enabled ? 'Disable' : 'Enable'}
+            </button>
+            <div class="cmd-ctx-separator"></div>
+            <button class="cmd-ctx-item cmd-ctx-danger" onclick={() => { const m = cmdCtxMenu!.meta; cmdCtxMenu = null; cmdSelectItem(m); cmdDeleteConfirm = true; cmdEditingMode = true; }}>
+              <span class="cmd-ctx-icon">✕</span> Delete Command
+            </button>
           </div>
-        {:else}
+        </div>
+      {/if}
+
+      {:else}
+      <!-- ═══ DETAIL EDITOR VIEW ═══ -->
+      <div class="cmd-detail-view">
+        <!-- Back bar -->
+        <div class="cmd-detail-bar">
+          <button class="cmd-tb-btn" onclick={cmdCloseEditor}>
+            ← Back to list
+          </button>
+          <span class="cmd-detail-bar-title">
+            {#if cmdIsNew}New Command{:else}Edit: {cmdPhrase || '(untitled)'}{/if}
+          </span>
+        </div>
+
+        <div class="cmd-detail-scroll">
           <div class="cmd-form">
             <!-- Phrase -->
             <div class="cmd-field">
@@ -1803,15 +2393,15 @@ echo "Hello, world!"
             <!-- Actions row -->
             <div class="cmd-actions">
               {#if cmdIsNew}
-                <button class="cmd-btn-ghost" onclick={cmdCancelNew}>Cancel</button>
-                <button class="cmd-btn-primary" disabled={!cmdCanSave} onclick={cmdSave}>
+                <button class="cmd-btn-ghost" onclick={() => { cmdCancelNew(); cmdCloseEditor(); }}>Cancel</button>
+                <button class="cmd-btn-primary" disabled={!cmdCanSave} onclick={async () => { await cmdSave(); if (!cmdSaveError) cmdCloseEditor(); }}>
                   {cmdSaving ? "Creating…" : "Create"}
                 </button>
               {:else}
                 {#if cmdDeleteConfirm}
                   <span class="cmd-delete-confirm-text">Delete this command?</span>
-                  <button class="cmd-btn-ghost" onclick={() => cmdDeleteConfirm = false}>Cancel</button>
-                  <button class="cmd-btn-danger" onclick={cmdDelete}>Delete</button>
+                  <button class="cmd-btn-ghost" onclick={() => { cmdDeleteConfirm = false; cmdCloseEditor(); }}>Cancel</button>
+                  <button class="cmd-btn-danger" onclick={async () => { await cmdDelete(); cmdCloseEditor(); }}>Delete</button>
                 {:else}
                   <div class="cmd-actions-left">
                     <button class="cmd-btn-ghost cmd-btn-ghost-danger" onclick={cmdDelete}>Delete</button>
@@ -1824,38 +2414,69 @@ echo "Hello, world!"
                       </button>
                     {/if}
                   </div>
-                  <button class="cmd-btn-primary" disabled={!cmdCanSave} onclick={cmdSave}>
+                  <button class="cmd-btn-primary" disabled={!cmdCanSave} onclick={async () => { await cmdSave(); if (!cmdSaveError) cmdCloseEditor(); }}>
                     {cmdSaving ? "Saving…" : "Save"}
                   </button>
                 {/if}
               {/if}
             </div>
           </div>
-        {/if}
+        </div>
       </div>
+      {/if}
     </div>
     {/if}
 
     <!-- Settings tab -->
     {#if activePreferencesTab === "settings"}
     <!-- svelte-ignore a11y_no_static_element_interactions -->
-    <div class="settings-panel">
-      <div class="settings-header">
-        <span class="settings-title">Settings</span>
-        <div class="settings-header-right">
-          <button class="settings-restore" onclick={restoreDefaults}>Restore Defaults</button>
+    <div class="settings-panel" onkeydown={handleSettingsKeydown}>
+
+      <!-- Auto-save bar -->
+      <div class="settings-autosave-bar">
+        <span class="settings-autosave-pill">
           {#if settingsSaved}
-            <span class="settings-saved-badge">Saved</span>
+            <span class="settings-autosave-dot saved"></span> Changes saved
+          {:else}
+            <span class="settings-autosave-dot"></span> All changes saved automatically
           {/if}
-          <button class="settings-done" onclick={closeSettings}>Save</button>
-        </div>
+        </span>
+        <span class="settings-autosave-right">
+          <button class="settings-restore" onclick={() => settingsRestoreConfirm = true}>Restore Defaults…</button>
+        </span>
+      </div>
+
+    <div class="settings-layout">
+      <!-- Sidebar nav -->
+      <div class="settings-nav">
+        <button class="settings-nav-item" class:active={settingsActiveNav === 'keyboard'} onclick={() => settingsScrollTo('keyboard')}>
+          <svg class="settings-nav-icon" width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><rect x="2" y="6" width="3" height="3" rx="0.5"/><rect x="6.5" y="6" width="3" height="3" rx="0.5"/><rect x="11" y="6" width="3" height="3" rx="0.5"/></svg>
+          Keyboard
+        </button>
+        <button class="settings-nav-item" class:active={settingsActiveNav === 'behavior'} onclick={() => settingsScrollTo('behavior')}>
+          <svg class="settings-nav-icon" width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M8 1l1.6 4 4.4.4-3.3 3 1 4.5L8 10.7 4.3 13l1-4.5L2 5.4 6.4 5z"/></svg>
+          Behavior
+        </button>
+        <button class="settings-nav-item" class:active={settingsActiveNav === 'files'} onclick={() => settingsScrollTo('files')}>
+          <svg class="settings-nav-icon" width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M1.5 3a1 1 0 011-1h3.59a1 1 0 01.7.29l1 1A1 1 0 008.5 3.6h6a1 1 0 011 1v8a1 1 0 01-1 1h-13a1 1 0 01-1-1V3z"/></svg>
+          Files & Paths
+        </button>
+        <button class="settings-nav-item" class:active={settingsActiveNav === 'about'} onclick={() => settingsScrollTo('about')}>
+          <svg class="settings-nav-icon" width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M8 1a7 7 0 100 14A7 7 0 008 1zm0 3a1 1 0 11-2 0 1 1 0 012 0zm-1 3v4h2V7H7z"/></svg>
+          About
+        </button>
       </div>
 
     <div class="settings-body">
+      <!-- Section: Keyboard -->
+      <div class="settings-section-title" id="settings-section-keyboard">Keyboard</div>
+
       <!-- Global shortcut -->
       <div class="settings-row">
+        <div class="settings-row-icon">⌨</div>
         <div class="settings-row-info">
-          <span class="row-title">Global shortcut</span>
+          <span class="row-title">Activation hotkey <span class="row-help" title="The system-wide keyboard shortcut that opens Nimble from any app.">?</span></span>
+          <span class="row-desc">Open the launcher from anywhere on your system.</span>
         </div>
         {#if settingsChangingHotkey}
           <div class="hotkey-capture-row">
@@ -1871,17 +2492,26 @@ echo "Hello, world!"
           {/if}
         {:else}
           <div class="row-right">
-            <code class="hotkey-badge">{currentSettings.hotkey ?? "Not set"}</code>
-            <button class="action-btn" onclick={() => { settingsChangingHotkey = true; settingsCapturedShortcut = ""; }}>Change</button>
+            <div class="settings-hotkey-keys">
+              {#each (currentSettings.hotkey ?? "Not set").split("+") as part, i}
+                {#if i > 0}<span class="settings-hotkey-plus">+</span>{/if}
+                <span class="settings-hotkey-key">{part}</span>
+              {/each}
+            </div>
+            <button class="action-btn" onclick={() => { settingsChangingHotkey = true; settingsCapturedShortcut = ""; }}>Change…</button>
           </div>
         {/if}
       </div>
 
+      <!-- Section: Behavior -->
+      <div class="settings-section-title" id="settings-section-behavior">Behavior</div>
+
       <!-- Show context chip -->
       <div class="settings-row">
+        <div class="settings-row-icon">◐</div>
         <div class="settings-row-info">
-          <span class="row-title">Show context chip</span>
-          <span class="row-desc">Display the active context label in the launcher bar</span>
+          <span class="row-title">Show context chip <span class="row-help" title="Shows the active context (e.g. project name) inside the launcher input bar.">?</span></span>
+          <span class="row-desc">Display the active context label in the launcher bar.</span>
         </div>
         <!-- svelte-ignore a11y_click_events_have_key_events -->
         <!-- svelte-ignore a11y_no_static_element_interactions -->
@@ -1900,9 +2530,10 @@ echo "Hello, world!"
 
       <!-- Allow duplicates -->
       <div class="settings-row">
+        <div class="settings-row-icon">⚊</div>
         <div class="settings-row-info">
-          <span class="row-title">Allow duplicate commands</span>
-          <span class="row-desc">Load all commands even when phrases collide</span>
+          <span class="row-title">Allow duplicate commands <span class="row-help" title="When enabled, multiple commands with the same phrase load together. When disabled, only the first is loaded.">?</span></span>
+          <span class="row-desc">Load all commands even when phrases collide.</span>
         </div>
         <!-- svelte-ignore a11y_click_events_have_key_events -->
         <!-- svelte-ignore a11y_no_static_element_interactions -->
@@ -1919,11 +2550,17 @@ echo "Hello, world!"
         </div>
       </div>
 
+      <!-- Section: Files & Paths -->
+      <div class="settings-section-title" id="settings-section-files">Files & Paths</div>
+
       <!-- Shared scripts directory -->
       <div class="settings-row settings-row-stacked">
-        <div class="settings-row-info">
-          <span class="row-title">Shared directory</span>
-          <span class="row-desc">Subdirectory inside commands root for shared scripts and lists (default: shared)</span>
+        <div class="settings-row-top">
+          <div class="settings-row-icon">↗</div>
+          <div class="settings-row-info">
+            <span class="row-title">Shared directory <span class="row-help" title="Subdirectory inside commands root for shared scripts and lists referenced via 'shared:' prefix.">?</span></span>
+            <span class="row-desc">Subdirectory for scripts and lists referenced via <code class="settings-code">shared:</code> prefix.</span>
+          </div>
         </div>
         <input
           class="settings-text-input"
@@ -1939,9 +2576,12 @@ echo "Hello, world!"
 
       <!-- Commands directory -->
       <div class="settings-row settings-row-stacked">
-        <div class="settings-row-info">
-          <span class="row-title">Commands directory</span>
-          <span class="row-desc">Custom absolute path. Changes apply immediately.</span>
+        <div class="settings-row-top">
+          <div class="settings-row-icon">📁</div>
+          <div class="settings-row-info">
+            <span class="row-title">Commands directory</span>
+            <span class="row-desc">Where Nimble loads command YAML files from.</span>
+          </div>
         </div>
         <div class="settings-dir-row">
           {#if settingsCommandsDir.trim()}
@@ -1956,9 +2596,51 @@ echo "Hello, world!"
             </div>
           {/if}
           <button class="settings-browse-btn" onclick={browseCommandsDir}>Browse…</button>
+          <button class="settings-browse-btn" onclick={() => {
+            const dir = settingsCommandsDir.trim() || defaultCommandsDir;
+            if (dir) invoke("reveal_in_file_manager", { path: dir }).catch(() => {});
+          }}>Reveal</button>
+        </div>
+      </div>
+
+      <!-- Section: About -->
+      <div class="settings-section-title" id="settings-section-about">About</div>
+
+      <div class="settings-about-card">
+        <div class="settings-about-logo">N</div>
+        <div class="settings-about-info">
+          <div class="settings-about-name">Nimble</div>
+          <div class="settings-about-version">Version 1.1.0 · {navigator.platform.startsWith('Mac') ? 'macOS' : navigator.platform.startsWith('Linux') ? 'Linux' : 'Windows'}</div>
+          <div class="settings-about-links">
+            <a class="settings-about-link" href="https://github.com/surdy/nimble" target="_blank" rel="noopener">GitHub</a>
+            <span class="settings-about-sep">·</span>
+            <a class="settings-about-link" href="https://github.com/surdy/nimble/blob/main/docs/getting-started.md" target="_blank" rel="noopener">Documentation</a>
+            <span class="settings-about-sep">·</span>
+            <a class="settings-about-link" href="https://github.com/surdy/nimble/blob/main/CHANGELOG.md" target="_blank" rel="noopener">Changelog</a>
+          </div>
         </div>
       </div>
     </div>
+    </div>
+
+    <!-- Restore Defaults confirmation modal -->
+    {#if settingsRestoreConfirm}
+      <!-- svelte-ignore a11y_click_events_have_key_events -->
+      <!-- svelte-ignore a11y_no_static_element_interactions -->
+      <div class="settings-modal-overlay" onclick={() => settingsRestoreConfirm = false}>
+        <div class="settings-modal" onclick={(e) => e.stopPropagation()}>
+          <div class="settings-modal-title">Restore default settings?</div>
+          <div class="settings-modal-body">
+            This will reset the global shortcut, behavior toggles, and shared directory to their defaults.
+            Your commands and command directory path are not affected.
+          </div>
+          <div class="settings-modal-actions">
+            <button class="action-btn" onclick={() => settingsRestoreConfirm = false}>Cancel</button>
+            <button class="action-btn cancel" onclick={() => { settingsRestoreConfirm = false; restoreDefaults(); }}>Restore Defaults</button>
+          </div>
+        </div>
+      </div>
+    {/if}
   </div>
     {/if}
   </div>
@@ -2013,7 +2695,17 @@ echo "Hello, world!"
             <div class="no-results">{loadingMsg}</div>
           {:else if listItems.length === 0}
             {@const scriptName = activeListCmd?.action.type === "dynamic_list" ? activeListCmd.action.config.script : null}
-            <div class="no-results">No results returned{#if scriptName}&hairsp;<span class="no-results-hint">({scriptName})</span>{/if}</div>
+            {@const hasFilter = (() => {
+              if (!activeListCmd) return false;
+              const phrase = activeListCmd.phrase.toLowerCase();
+              const typed = effectiveInput.toLowerCase();
+              return typed.startsWith(phrase + " ") && typed.slice(phrase.length + 1).trim() !== "";
+            })()}
+            {#if hasFilter && fullListItems.length > 0}
+              <div class="no-results">No matches for filter</div>
+            {:else}
+              <div class="no-results">No results returned{#if scriptName}&hairsp;<span class="no-results-hint">({scriptName})</span>{/if}</div>
+            {/if}
           {:else}
             {#each listItems as item, i}
               <!-- svelte-ignore a11y_no_static_element_interactions -->
@@ -2535,6 +3227,32 @@ echo "Hello, world!"
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   }
 
+  /* ─── Auto-save bar ─── */
+  .settings-autosave-bar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    height: 36px;
+    padding: 0 16px;
+    background: rgba(255,255,255,.02);
+    border-bottom: 1px solid rgba(255,255,255,.07);
+    flex-shrink: 0;
+  }
+  .settings-autosave-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 11px;
+    color: rgba(245,245,247,.35);
+  }
+  .settings-autosave-dot {
+    width: 6px; height: 6px;
+    border-radius: 50%;
+    background: #3a9d5c;
+  }
+  .settings-autosave-dot.saved { background: #0a84ff; }
+  .settings-autosave-right { margin-left: auto; }
+
   .settings-header {
     display: flex;
     align-items: center;
@@ -2582,7 +3300,7 @@ echo "Hello, world!"
     border: 1px solid rgba(255,255,255,.12);
     border-radius: 6px;
     color: rgba(245,245,247,.5);
-    font-size: 13px;
+    font-size: 12px;
     font-weight: 500;
     font-family: inherit;
     padding: 5px 14px;
@@ -2598,8 +3316,57 @@ echo "Hello, world!"
   .settings-body {
     flex: 1;
     overflow-y: auto;
-    padding: 4px 0;
+    padding: 0 0 16px;
+    background: rgba(255,255,255,.02);
   }
+
+  /* ─── Settings sidebar nav ─── */
+  .settings-layout {
+    display: flex;
+    flex: 1;
+    overflow: hidden;
+  }
+  .settings-nav {
+    width: 180px;
+    flex-shrink: 0;
+    background: rgba(255,255,255,.02);
+    border-right: 1px solid rgba(255,255,255,.07);
+    padding: 14px 8px;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+  .settings-nav-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    height: 32px;
+    padding: 0 12px;
+    border-radius: 6px;
+    background: none;
+    border: none;
+    color: #f5f5f7;
+    font-family: inherit;
+    font-size: 12.5px;
+    cursor: pointer;
+    text-align: left;
+    transition: background .1s ease;
+  }
+  .settings-nav-item:hover { background: rgba(255,255,255,.04); }
+  .settings-nav-item.active { background: #0a84ff; color: #fff; font-weight: 500; }
+  .settings-nav-icon { width: 16px; flex-shrink: 0; opacity: .8; }
+
+  /* ─── Section dividers ─── */
+  .settings-section-title {
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: rgba(245,245,247,.35);
+    padding: 18px 16px 6px;
+    border-top: 1px solid rgba(255,255,255,.05);
+  }
+  .settings-section-title:first-child { border-top: none; }
 
   .settings-row {
     display: flex;
@@ -2617,6 +3384,26 @@ echo "Hello, world!"
     align-items: flex-start;
     gap: 8px;
   }
+  .settings-row-top {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    width: 100%;
+  }
+
+  /* ─── Row icon ─── */
+  .settings-row-icon {
+    width: 32px;
+    height: 32px;
+    flex-shrink: 0;
+    background: rgba(10,132,255,.12);
+    border-radius: 8px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: #0a84ff;
+    font-size: 16px;
+  }
 
   .settings-row-info {
     display: flex;
@@ -2632,9 +3419,32 @@ echo "Hello, world!"
     font-weight: 500;
   }
 
+  /* ─── Help tooltip ─── */
+  .row-help {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    background: rgba(255,255,255,.08);
+    color: rgba(245,245,247,.35);
+    font-size: 10px;
+    font-weight: 600;
+    cursor: help;
+    vertical-align: middle;
+    margin-left: 4px;
+  }
+
   .row-desc {
     color: rgba(245,245,247,.4);
     font-size: 11px;
+  }
+
+  .settings-code {
+    font-family: "SF Mono", Menlo, monospace;
+    font-size: 11px;
+    opacity: .8;
   }
 
   .row-error {
@@ -2649,6 +3459,34 @@ echo "Hello, world!"
     align-items: center;
     gap: 8px;
     flex-shrink: 0;
+  }
+
+  /* ─── Polished hotkey display ─── */
+  .settings-hotkey-keys {
+    display: flex;
+    align-items: center;
+    gap: 3px;
+  }
+  .settings-hotkey-key {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 26px;
+    height: 26px;
+    padding: 0 6px;
+    background: linear-gradient(180deg, rgba(255,255,255,.12), rgba(255,255,255,.05));
+    border: 1px solid rgba(255,255,255,.18);
+    border-radius: 5px;
+    font-size: 12px;
+    font-weight: 500;
+    box-shadow: 0 1px 0 rgba(0,0,0,.2);
+    font-family: "SF Mono", Menlo, monospace;
+    color: rgba(245,245,247,.7);
+  }
+  .settings-hotkey-plus {
+    color: rgba(245,245,247,.25);
+    font-size: 10px;
+    margin: 0 1px;
   }
 
   .hotkey-badge {
@@ -2674,6 +3512,80 @@ echo "Hello, world!"
     font-size: 12px;
     min-width: 130px;
   }
+
+  /* ─── Restore Defaults confirmation modal ─── */
+  .settings-modal-overlay {
+    position: absolute;
+    inset: 0;
+    background: rgba(0,0,0,.5);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 100;
+    border-radius: 12px;
+  }
+  .settings-modal {
+    background: #252526;
+    border: 1px solid rgba(255,255,255,.15);
+    border-radius: 10px;
+    padding: 22px 24px;
+    max-width: 380px;
+    box-shadow: 0 24px 80px rgba(0,0,0,.6);
+  }
+  .settings-modal-title {
+    font-size: 14px;
+    font-weight: 600;
+    color: #f5f5f7;
+    margin-bottom: 8px;
+  }
+  .settings-modal-body {
+    font-size: 12.5px;
+    color: rgba(245,245,247,.5);
+    line-height: 1.5;
+    margin-bottom: 18px;
+  }
+  .settings-modal-actions {
+    display: flex;
+    gap: 8px;
+    justify-content: flex-end;
+  }
+
+  /* ─── About section ─── */
+  .settings-about-card {
+    background: rgba(255,255,255,.02);
+    border: 1px solid rgba(255,255,255,.07);
+    border-radius: 8px;
+    padding: 16px;
+    display: flex;
+    gap: 14px;
+    align-items: center;
+    margin: 8px 16px;
+  }
+  .settings-about-logo {
+    width: 48px;
+    height: 48px;
+    border-radius: 10px;
+    background: linear-gradient(135deg, #0a84ff, #5e5ce6);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 24px;
+    font-weight: 700;
+    color: #fff;
+    flex-shrink: 0;
+  }
+  .settings-about-info { flex: 1; }
+  .settings-about-name { font-size: 16px; font-weight: 600; color: #f5f5f7; }
+  .settings-about-version { font-size: 12px; color: rgba(245,245,247,.5); margin-top: 2px; }
+  .settings-about-links { display: flex; gap: 6px; margin-top: 8px; align-items: center; }
+  .settings-about-link {
+    font-size: 11px;
+    color: #0a84ff;
+    text-decoration: none;
+    cursor: pointer;
+  }
+  .settings-about-link:hover { text-decoration: underline; }
+  .settings-about-sep { color: rgba(245,245,247,.25); font-size: 10px; }
 
   .action-btn {
     background: rgba(255,255,255,.08);
@@ -2850,148 +3762,473 @@ echo "Hello, world!"
   /* ── Command editor ──────────────────────────────────────────────────── */
   .cmd-editor {
     display: flex;
+    flex-direction: column;
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
     color: #f5f5f7;
     background: #1c1c1e;
     height: 100%;
   }
 
-  /* Sidebar */
-  .cmd-sidebar {
-    width: 210px;
-    min-width: 160px;
-    max-width: 280px;
-    display: flex;
-    flex-direction: column;
-    border-right: 1px solid rgba(255,255,255,.07);
-    background: rgba(255,255,255,.025);
-    flex-shrink: 0;
-  }
-
-  .cmd-sidebar-header {
+  /* ─── Toolbar ─── */
+  .cmd-toolbar {
     display: flex;
     align-items: center;
-    gap: 6px;
-    padding: 10px 10px 8px;
-    border-bottom: 1px solid rgba(255,255,255,.06);
+    height: 44px;
+    padding: 0 12px;
+    background: rgba(255,255,255,.025);
+    border-bottom: 1px solid rgba(255,255,255,.07);
     flex-shrink: 0;
+    gap: 8px;
   }
+  .cmd-toolbar-left { display: flex; align-items: center; gap: 6px; }
+  .cmd-toolbar-right { display: flex; align-items: center; gap: 6px; margin-left: auto; }
 
-  .cmd-filter {
-    flex: 1;
+  .cmd-tb-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    height: 28px;
+    padding: 0 10px;
+    background: rgba(255,255,255,.06);
+    border: 1px solid rgba(255,255,255,.1);
+    border-radius: 6px;
+    color: #ccc;
+    font-size: 12px;
+    font-family: inherit;
+    cursor: pointer;
+    gap: 5px;
+    transition: all .12s ease;
+    white-space: nowrap;
+  }
+  .cmd-tb-btn:hover { background: rgba(255,255,255,.1); border-color: rgba(255,255,255,.16); }
+  .cmd-tb-btn:active { background: rgba(255,255,255,.04); transform: scale(0.97); }
+  .cmd-tb-btn:disabled { opacity: .35; pointer-events: none; }
+
+  .cmd-tb-btn-primary {
+    background: #0a84ff;
+    border-color: transparent;
+    color: #fff;
+    font-weight: 500;
+  }
+  .cmd-tb-btn-primary:hover { background: #1a8ad4; }
+
+  .cmd-tb-btn-danger { color: #c74e4e; border-color: rgba(199,78,78,.25); }
+  .cmd-tb-btn-danger:hover { background: rgba(199,78,78,.12); color: #d65f5f; }
+
+  .cmd-tb-icon { font-size: 15px; line-height: 1; font-weight: 300; }
+  .cmd-tb-kbd {
+    font-size: 10px;
+    opacity: .5;
+    padding: 1px 4px;
+    background: rgba(0,0,0,.25);
+    border-radius: 3px;
+    font-family: "SF Mono", Menlo, monospace;
+  }
+  .cmd-tb-separator { width: 1px; height: 20px; background: rgba(255,255,255,.07); margin: 0 4px; }
+
+  /* ─── Segmented group control ─── */
+  .cmd-seg-group {
+    display: inline-flex;
+    height: 28px;
+    background: rgba(255,255,255,.06);
+    border: 1px solid rgba(255,255,255,.1);
+    border-radius: 6px;
+    overflow: hidden;
+  }
+  .cmd-seg-label {
+    padding: 0 10px;
+    display: inline-flex;
+    align-items: center;
+    font-size: 11px;
+    color: rgba(245,245,247,.4);
+    border-right: 1px solid rgba(255,255,255,.1);
+  }
+  .cmd-seg-btn {
+    padding: 0 10px;
+    background: none;
+    border: none;
+    color: #ccc;
+    font-size: 12px;
+    cursor: pointer;
+    font-family: inherit;
+    border-right: 1px solid rgba(255,255,255,.06);
+  }
+  .cmd-seg-btn:last-child { border-right: none; }
+  .cmd-seg-btn.active { background: rgba(10,132,255,.2); color: #5bb8ff; }
+  .cmd-seg-btn:hover:not(.active) { background: rgba(255,255,255,.06); }
+
+  .cmd-search-wrapper { position: relative; }
+  .cmd-search-wrapper::before {
+    content: "⌕";
+    position: absolute;
+    left: 9px; top: 50%;
+    transform: translateY(-50%);
+    font-size: 14px;
+    color: rgba(245,245,247,.35);
+    pointer-events: none;
+    z-index: 1;
+  }
+  .cmd-search-box {
+    height: 28px;
+    width: 180px;
+    padding: 0 8px 0 28px;
     background: rgba(255,255,255,.06);
     border: 1px solid rgba(255,255,255,.1);
     border-radius: 6px;
     color: #f5f5f7;
     font-size: 12px;
     font-family: inherit;
-    padding: 5px 8px;
     outline: none;
-    transition: border-color .15s;
+    transition: all .15s ease;
   }
-  .cmd-filter:focus { border-color: rgba(10,132,255,.5); }
-  .cmd-filter::placeholder { color: rgba(245,245,247,.3); }
+  .cmd-search-box:focus { border-color: rgba(10,132,255,.5); background: rgba(255,255,255,.08); width: 220px; }
+  .cmd-search-box::placeholder { color: rgba(245,245,247,.3); }
 
-  .cmd-new-btn {
-    background: #0a84ff;
-    border: none;
-    border-radius: 6px;
-    color: #fff;
-    font-size: 18px;
-    line-height: 1;
-    width: 28px;
-    height: 28px;
-    display: flex;
+  /* ─── Column header ─── */
+  .cmd-col-header {
+    display: grid;
+    grid-template-columns: 28px 200px 1fr 120px 90px 60px;
     align-items: center;
-    justify-content: center;
-    cursor: pointer;
+    height: 28px;
+    padding: 0 16px;
+    background: rgba(255,255,255,.02);
+    border-bottom: 1px solid rgba(255,255,255,.07);
+    position: sticky;
+    top: 0;
+    z-index: 10;
     flex-shrink: 0;
-    transition: opacity .15s;
   }
-  .cmd-new-btn:hover { opacity: .85; }
+  .cmd-col-header span {
+    font-size: 11px;
+    font-weight: 600;
+    color: rgba(245,245,247,.4);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+  .cmd-col-check { display: flex; align-items: center; justify-content: center; }
+  .cmd-bulk-header-cb { cursor: pointer; }
+  .cmd-col-sortable {
+    cursor: pointer;
+    user-select: none;
+    transition: color .15s;
+  }
+  .cmd-col-sortable:hover { color: rgba(245,245,247,.6); }
+  .cmd-col-sortable.sorted { color: #0a84ff; }
+  .cmd-col-center { text-align: center; }
 
-  .cmd-list {
+  /* ─── Table container ─── */
+  .cmd-table-container {
     flex: 1;
     overflow-y: auto;
-    padding: 4px;
+    overflow-x: hidden;
+    background: #1c1c1e;
     scrollbar-width: thin;
-    scrollbar-color: rgba(255,255,255,.2) transparent;
+    scrollbar-color: rgba(255,255,255,.15) transparent;
   }
+  .cmd-table-container::-webkit-scrollbar { width: 7px; }
+  .cmd-table-container::-webkit-scrollbar-track { background: transparent; }
+  .cmd-table-container::-webkit-scrollbar-thumb { background: rgba(255,255,255,.15); border-radius: 4px; }
+  .cmd-table-container::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,.25); }
 
-  .cmd-list-empty {
-    padding: 20px 12px;
-    color: rgba(245,245,247,.35);
-    font-size: 12px;
-    text-align: center;
-    line-height: 1.6;
-  }
-
-  .cmd-list-item {
+  .cmd-table-empty {
+    flex: 1;
     display: flex;
     flex-direction: column;
-    gap: 3px;
-    padding: 7px 8px 7px 22px;
-    border-radius: 7px;
-    cursor: default;
-    transition: background .1s;
-    border-left: 2px solid transparent;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
+    padding: 48px 20px;
+    color: rgba(245,245,247,.35);
   }
-  .cmd-list-item:hover { background: rgba(255,255,255,.06); }
-  .cmd-list-item.selected {
-    background: rgba(255,255,255,.09);
-    border-left-color: #0a84ff;
-  }
+  .cmd-empty-icon { font-size: 48px; opacity: .3; }
+  .cmd-empty-title { font-size: 16px; font-weight: 500; color: #e8e8e8; }
+  .cmd-empty-desc { font-size: 12px; max-width: 320px; text-align: center; line-height: 1.5; }
+  .cmd-empty-actions { display: flex; gap: 8px; margin-top: 8px; }
 
-  .cmd-item-phrase {
+  /* ─── Folder group ─── */
+  .cmd-tbl-folder-header {
+    display: flex;
+    align-items: center;
+    width: 100%;
+    height: 30px;
+    padding: 0 12px;
+    background: linear-gradient(180deg, rgba(255,255,255,.035) 0%, rgba(255,255,255,.015) 100%);
+    border: none;
+    border-bottom: 1px solid rgba(255,255,255,.04);
+    border-top: 1px solid rgba(255,255,255,.04);
+    cursor: pointer;
+    font-family: inherit;
+    color: inherit;
+    gap: 6px;
+    transition: background .1s ease;
+  }
+  .cmd-folder-group:first-child .cmd-tbl-folder-header { border-top: none; }
+  .cmd-tbl-folder-header:hover { background: rgba(255,255,255,.05); }
+
+  .cmd-tbl-chevron {
+    font-size: 10px;
+    color: rgba(245,245,247,.4);
+    width: 14px;
+    text-align: center;
+    transition: transform .15s ease;
+    display: inline-block;
+  }
+  .cmd-tbl-chevron.collapsed { transform: rotate(-90deg); }
+  .cmd-tbl-folder-svg { color: rgba(245,245,247,.4); flex-shrink: 0; }
+  .cmd-tbl-group-icon { font-size: 12px; opacity: .6; flex-shrink: 0; }
+  .cmd-tbl-folder-name { font-size: 11.5px; font-weight: 600; color: rgba(245,245,247,.5); letter-spacing: 0.02em; }
+  .cmd-tbl-folder-disabled {
+    font-size: 9px;
+    padding: 1px 5px;
+    border-radius: 3px;
+    background: rgba(240,185,66,.15);
+    color: #f0b942;
+    margin-left: auto;
+  }
+  .cmd-tbl-folder-count { font-size: 10px; color: rgba(245,245,247,.3); margin-left: 4px; }
+  .cmd-tbl-folder-disabled + .cmd-tbl-folder-count { margin-left: 8px; }
+
+  /* ─── Command row ─── */
+  .cmd-tbl-row {
+    display: grid;
+    grid-template-columns: 28px 200px 1fr 120px 90px 60px;
+    align-items: center;
+    height: 34px;
+    padding: 0 16px;
+    border-bottom: 1px solid rgba(255,255,255,.03);
+    cursor: default;
+    transition: background .08s ease;
+    position: relative;
+  }
+  .cmd-tbl-row:hover { background: rgba(255,255,255,.04); }
+  .cmd-tbl-row.selected { background: rgba(10,132,255,.25); }
+  .cmd-tbl-row.selected:hover { background: rgba(10,132,255,.3); }
+  .cmd-tbl-row.disabled-row .cmd-tbl-phrase,
+  .cmd-tbl-row.disabled-row .cmd-tbl-title,
+  .cmd-tbl-row.disabled-row .cmd-tbl-badge { opacity: .4; }
+
+  .cmd-tbl-phrase {
+    font-family: "SF Mono", "Fira Code", "Cascadia Code", Menlo, monospace;
     font-size: 12px;
-    font-weight: 500;
-    color: #f5f5f7;
+    color: #e8e8e8;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
-  }
-
-  .cmd-item-badge {
-    font-size: 9px;
+    padding-right: 12px;
     font-weight: 500;
-    letter-spacing: 0.4px;
-    text-transform: uppercase;
+    letter-spacing: -0.02em;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .cmd-tbl-status-warn {
+    font-size: 11px;
+    color: #f0b942;
+    flex-shrink: 0;
+    cursor: help;
+  }
+  .cmd-tbl-title {
+    font-size: 12.5px;
+    color: #ccc;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    padding-right: 12px;
+  }
+  .cmd-tbl-modified {
+    font-size: 11px;
     color: rgba(245,245,247,.4);
-  }
-  .cmd-badge-open-url      { color: #0a84ff; }
-  .cmd-badge-paste-text    { color: #30d158; }
-  .cmd-badge-copy-text     { color: #ff9f0a; }
-  .cmd-badge-static-list   { color: #bf5af2; }
-  .cmd-badge-dynamic-list  { color: #64d2ff; }
-  .cmd-badge-script-action { color: #ff6482; }
-
-  /* Detail panel */
-  .cmd-detail {
-    flex: 1;
-    display: flex;
-    flex-direction: column;
-    overflow-y: auto;
+    white-space: nowrap;
   }
 
-  .cmd-empty-state {
-    flex: 1;
+  /* ─── Action badges ─── */
+  .cmd-tbl-badge {
+    display: inline-flex;
+    align-items: center;
+    height: 20px;
+    padding: 0 7px;
+    border-radius: 4px;
+    font-size: 10.5px;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    white-space: nowrap;
+    gap: 5px;
+  }
+  .cmd-tbl-badge-icon {
+    font-size: 11px;
+    line-height: 1;
+  }
+  .cmd-tbl-badge-open_url       { background: rgba(45,125,154,.18); color: #5bb8d4; }
+  .cmd-tbl-badge-paste_text     { background: rgba(124,92,191,.18); color: #b49adf; }
+  .cmd-tbl-badge-copy_text      { background: rgba(92,138,191,.18); color: #8fb8e0; }
+  .cmd-tbl-badge-static_list    { background: rgba(154,123,45,.18); color: #d4b95b; }
+  .cmd-tbl-badge-dynamic_list   { background: rgba(45,154,110,.18); color: #5bd4a3; }
+  .cmd-tbl-badge-script_action  { background: rgba(181,90,48,.18); color: #e0915b; }
+
+  /* ─── Toggle switch ─── */
+  .cmd-tbl-toggle-cell { display: flex; justify-content: center; }
+  .cmd-tbl-toggle {
+    position: relative;
+    width: 32px; height: 18px;
+    cursor: pointer;
+    display: inline-block;
+  }
+  .cmd-tbl-toggle input { opacity: 0; width: 0; height: 0; position: absolute; }
+  .cmd-tbl-toggle-track {
+    position: absolute; inset: 0;
+    background: #555;
+    border-radius: 9px;
+    transition: background .2s ease;
+  }
+  .cmd-tbl-toggle input:checked + .cmd-tbl-toggle-track { background: #3a9d5c; }
+  .cmd-tbl-toggle-knob {
+    position: absolute; top: 2px; left: 2px;
+    width: 14px; height: 14px;
+    background: #fff;
+    border-radius: 50%;
+    transition: transform .2s ease;
+    box-shadow: 0 1px 3px rgba(0,0,0,.3);
+  }
+  .cmd-tbl-toggle input:checked ~ .cmd-tbl-toggle-knob { transform: translateX(14px); }
+
+  /* ─── Bulk-select checkbox ─── */
+  .cmd-tbl-check-cell {
     display: flex;
-    flex-direction: column;
     align-items: center;
     justify-content: center;
-    gap: 8px;
-    color: rgba(245,245,247,.3);
-    font-size: 13px;
-    text-align: center;
-    padding: 40px;
   }
-  .cmd-empty-state p { margin: 0; }
+  .cmd-row-checkbox {
+    cursor: pointer;
+    opacity: 0;
+    transition: opacity .1s ease;
+  }
+  .cmd-tbl-row:hover .cmd-row-checkbox,
+  .cmd-tbl-row.checked .cmd-row-checkbox { opacity: 1; }
+
+  /* ─── Bulk-action bar ─── */
+  .cmd-bulk-bar {
+    display: none;
+    align-items: center;
+    height: 36px;
+    padding: 0 16px;
+    background: rgba(10,132,255,.15);
+    border-bottom: 1px solid rgba(10,132,255,.3);
+    gap: 8px;
+    font-size: 12px;
+    flex-shrink: 0;
+  }
+  .cmd-bulk-bar.visible { display: flex; }
+  .cmd-bulk-count { font-weight: 500; color: #5bb8ff; }
+  .cmd-bulk-actions { display: flex; gap: 6px; margin-left: auto; }
+
+  /* ─── Status bar ─── */
+  .cmd-statusbar {
+    display: flex;
+    align-items: center;
+    height: 26px;
+    padding: 0 14px;
+    background: rgba(255,255,255,.025);
+    border-top: 1px solid rgba(255,255,255,.07);
+    font-size: 11px;
+    color: rgba(245,245,247,.4);
+    flex-shrink: 0;
+    gap: 16px;
+  }
+  .cmd-statusbar-right { margin-left: auto; }
+  .cmd-statusbar kbd {
+    display: inline-block;
+    padding: 1px 5px;
+    background: rgba(255,255,255,.08);
+    border: 1px solid rgba(255,255,255,.12);
+    border-radius: 3px;
+    font-size: 10px;
+    font-family: inherit;
+    color: rgba(245,245,247,.5);
+  }
+  .cmd-statusbar-pill-warn {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 1px 7px;
+    border-radius: 9px;
+    font-weight: 500;
+    font-size: 11px;
+    background: rgba(240,185,66,.15);
+    color: #f0b942;
+  }
+
+  /* ─── Context menu ─── */
+  .cmd-ctx-backdrop {
+    position: fixed; inset: 0;
+    z-index: 1000;
+  }
+  .cmd-ctx-menu {
+    position: fixed;
+    background: #252526;
+    border: 1px solid rgba(255,255,255,.15);
+    border-radius: 6px;
+    padding: 4px 0;
+    min-width: 160px;
+    box-shadow: 0 8px 32px rgba(0,0,0,.5);
+    z-index: 1001;
+  }
+  .cmd-ctx-item {
+    display: flex;
+    align-items: center;
+    width: 100%;
+    height: 28px;
+    padding: 0 12px;
+    font-size: 12.5px;
+    color: #ccc;
+    cursor: default;
+    gap: 8px;
+    border: none;
+    background: none;
+    font-family: inherit;
+    text-align: left;
+  }
+  .cmd-ctx-item:hover { background: #0a84ff; color: #fff; border-radius: 3px; margin: 0 4px; padding: 0 8px; }
+  .cmd-ctx-separator { height: 1px; background: rgba(255,255,255,.07); margin: 4px 8px; }
+  .cmd-ctx-shortcut { margin-left: auto; font-size: 11px; color: rgba(245,245,247,.35); }
+  .cmd-ctx-item:hover .cmd-ctx-shortcut { color: rgba(255,255,255,.6); }
+  .cmd-ctx-icon { width: 16px; text-align: center; font-size: 13px; }
+  .cmd-ctx-danger { color: #c74e4e; }
+  .cmd-ctx-danger:hover { background: #c74e4e; color: #fff; }
+
+  /* ─── Detail editor view ─── */
+  .cmd-detail-view {
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    overflow: hidden;
+  }
+  .cmd-detail-bar {
+    display: flex;
+    align-items: center;
+    height: 44px;
+    padding: 0 12px;
+    background: rgba(255,255,255,.025);
+    border-bottom: 1px solid rgba(255,255,255,.07);
+    flex-shrink: 0;
+    gap: 12px;
+  }
+  .cmd-detail-bar-title {
+    font-size: 13px;
+    font-weight: 500;
+    color: rgba(245,245,247,.6);
+  }
+  .cmd-detail-scroll {
+    flex: 1;
+    overflow-y: auto;
+    padding: 16px 20px;
+    scrollbar-width: thin;
+    scrollbar-color: rgba(255,255,255,.15) transparent;
+  }
 
   .cmd-form {
     display: flex;
     flex-direction: column;
     gap: 16px;
-    padding: 20px 24px 24px;
     flex: 1;
   }
 
@@ -3156,61 +4393,6 @@ echo "Hello, world!"
     transition: background .15s;
   }
   .cmd-btn-danger:hover { background: rgba(255,69,58,.3); }
-
-  /* Folder headers in sidebar */
-  .cmd-folder-header {
-    display: flex;
-    align-items: center;
-    gap: 5px;
-    padding: 7px 8px 6px;
-    margin-top: 6px;
-    cursor: default;
-    user-select: none;
-    background: rgba(255,255,255,.04);
-    border: none;
-    border-top: 1px solid rgba(255,255,255,.12);
-    border-left: 2px solid rgba(10,132,255,.35);
-    border-radius: 0;
-    width: 100%;
-    text-align: left;
-    color: inherit;
-    font-family: inherit;
-  }
-  .cmd-folder-header:first-child { margin-top: 0; border-top: none; }
-  .cmd-folder-header:hover { background: rgba(255,255,255,.07); }
-
-  .cmd-folder-toggle {
-    font-size: 12px;
-    font-weight: 700;
-    color: rgba(245,245,247,.45);
-    width: 14px;
-    text-align: center;
-    flex-shrink: 0;
-    font-family: ui-monospace, "SF Mono", Menlo, monospace;
-    line-height: 1;
-  }
-
-  .cmd-folder-name {
-    font-size: 11px;
-    font-weight: 600;
-    letter-spacing: 0.3px;
-    color: rgba(245,245,247,.55);
-    flex: 1;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .cmd-folder-count {
-    font-size: 9px;
-    color: rgba(245,245,247,.3);
-    background: rgba(255,255,255,.08);
-    border-radius: 8px;
-    padding: 1px 6px;
-    min-width: 16px;
-    text-align: center;
-    font-weight: 500;
-  }
 
   /* Folder selection for new commands */
   .cmd-folder-input-row {
