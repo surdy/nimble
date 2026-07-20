@@ -10,7 +10,7 @@ The **nimble-authoring** skill helps you:
 - Choose the right action type for a use case
 - Set up `env.yaml` variables for script runtime
 - Create static list files (TSV)
-- Configure contexts for scoped matching
+- Configure contexts as ambient values for scripts
 - Troubleshoot why a command isn't matching
 - Write shell, Python, Node.js, or PowerShell scripts for `dynamic_list` and `script_action`
 - Debug script output format issues (empty results, JSON parse errors)

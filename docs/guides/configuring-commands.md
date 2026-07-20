@@ -56,7 +56,8 @@ action:
   type: open_url | paste_text | copy_text | static_list | dynamic_list | script_action
   config:
     # --- open_url ---
-    url: <string>        # any valid URL; use {param} for user-supplied input
+    url: <string>        # any valid URL; use {param} for user-supplied input and/or
+                         # {context} for the active context (see docs/guides/contexts.md)
 
     # --- paste_text ---
     text: <string>       # the text to paste (multi-line supported with YAML | block scalar)
@@ -67,22 +68,24 @@ action:
     # --- static_list ---
     list: <string>       # name of the list file (without .tsv) co-located with the command,
                          # or shared:<name> to reference a file in the shared directory
-    item_action: paste_text | copy_text | open_url   # optional
+    item_action: paste_text | copy_text | open_url | ctx_set   # optional
 
     # --- dynamic_list ---
     script: <string>     # name of the script file co-located with this command YAML,
                          # or shared:<name> to reference a script in the shared directory
-    arg: none | optional | required   # default: none
-    item_action: paste_text | copy_text | open_url   # optional
+    arg: none | optional | required | context   # default: none
+    item_action: paste_text | copy_text | open_url | ctx_set   # optional
 
     # --- script_action ---
     script: <string>     # name of the script file co-located with this command YAML,
                          # or shared:<name> to reference a script in the shared directory
-    arg: none | optional | required   # default: none
+    arg: none | optional | required | context   # default: none
     result_action: open_url | paste_text | copy_text   # required
     prefix: <string>     # optional — prepended to each value (paste_text / copy_text only)
     suffix: <string>     # optional — appended to each value (paste_text / copy_text only)
 ```
+
+> `arg: context` is "required, but an active context satisfies it" — a typed suffix always overrides and is passed as `$1`; the context itself is never passed positionally (scripts read `NIMBLE_CONTEXT` instead). `item_action: ctx_set` sets the active context to the selected item's value and keeps the launcher open. See [Contexts](contexts.md) for the full picture.
 
 ### Open URL example
 

@@ -1,0 +1,6 @@
+phrase: open dashboard
+title: Open Dashboard (uses the active context)
+action:
+  type: open_url
+  config:
+    url: https://{context}.example.com/dashboard

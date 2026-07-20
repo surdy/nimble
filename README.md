@@ -31,11 +31,11 @@ When you invoke the launcher and start typing, Nimble shows partial matches in r
 - **Paste Text** — paste pre-defined text snippets into the previously focused application via `⌘V` simulation
 - **Copy Text** — copy pre-defined text to the clipboard without simulating a keystroke
 - **Static List** — display a named YAML list of items inline as soon as the phrase is typed; selecting an item can paste, copy, or open a URL
-- **Dynamic List** — run an external script and show its output as an inline list; supports `none`, `optional`, and `required` argument modes for real-time filtering
+- **Dynamic List** — run an external script and show its output as an inline list; supports `none`, `optional`, `required`, and `context` argument modes for real-time filtering
 - **Script Action** — run a script on command execution and apply the result as a paste, copy, or open-URL action
 
 ### More capabilities
-- **Contexts** — set a persistent keyword that silently narrows all command matching to a topic; switch research sessions or project scopes without retyping
+- **Contexts** — set a persistent ambient keyword that every script receives via the `NIMBLE_CONTEXT` environment variable; switch project scopes without retyping. Commands can require a context instead of typed input (`arg: context`), pick one from a list (`item_action: ctx_set`), or drop it straight into a URL (`{context}` token)
 - **Copilot Skill** — an AI skill that helps you create commands and write scripts directly from GitHub Copilot Chat
 
 ---

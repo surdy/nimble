@@ -90,24 +90,6 @@ export function filterCommands(commands: Command[], typed: string): Command[] {
   });
 }
 
-// ── Param mode detection ────────────────────────────────────────────────
-/** Returns true if the raw input is in "param mode" (full phrase + extra text). */
-export function isParamMode(raw: string, commands: Command[]): boolean {
-  const lower = raw.trim().toLowerCase();
-  if (lower === "" || lower.startsWith("/")) return false;
-  return commands.some(cmd => lower.startsWith(cmd.phrase.toLowerCase() + " "));
-}
-
-// ── Effective input ─────────────────────────────────────────────────────
-/** Compute the effective input, appending context when appropriate. */
-export function computeEffectiveInput(input: string, activeContext: string, commands: Command[]): string {
-  const trimmed = input.trim();
-  if (activeContext && trimmed !== "" && !trimmed.startsWith("/") && !isParamMode(trimmed, commands)) {
-    return trimmed + " " + activeContext;
-  }
-  return trimmed;
-}
-
 // ── Fuzzy matching ──────────────────────────────────────────────────────
 
 /** Word-boundary characters for fuzzy scoring. */

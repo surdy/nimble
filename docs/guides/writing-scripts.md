@@ -55,6 +55,17 @@ else
 fi
 ```
 
+#### `arg: context`
+
+[`script_action`](../actions/script-action.md) and [`dynamic_list`](../actions/dynamic-list.md) commands can use `arg: context`. In this mode Nimble passes the typed suffix as `$1` when the user types one, but otherwise fires with **no** positional argument and expects the script to fall back to the [`NIMBLE_CONTEXT`](#built-in-environment-variables) environment variable. With neither a suffix nor an active context the script does not run at all. The context value is never passed as `$1`. Write context-aware scripts to prefer the explicit argument and fall back to the context:
+
+```sh
+#!/bin/sh
+# Prefer the typed suffix; fall back to the active context.
+TARGET="${1:-$NIMBLE_CONTEXT}"
+echo "Deploying to: $TARGET"
+```
+
 ### Timeout
 
 Nimble enforces a **5-second timeout**. If the script does not exit within 5 seconds, an empty list is shown and the script process is abandoned. Keep scripts fast.
@@ -80,7 +91,7 @@ action:
   type: dynamic_list
   config:
     script: contacts.sh     # resolves to the same directory as this YAML
-    arg: optional           # none | optional | required
+    arg: optional           # none | optional | required | context
     item_action: paste_text # optional; same as static_list
 ```
 
@@ -95,10 +106,12 @@ See [Dynamic List](../actions/dynamic-list.md) for the full YAML schema and argu
 | `none` *(default)* | Exact phrase match only | No arguments |
 | `optional` | Exact match (immediately) **and** phrase + suffix | No arg on exact match; suffix otherwise |
 | `required` | Only when a non-empty suffix follows the phrase | The typed suffix as `$1` |
+| `context` | Non-empty suffix **or** bare phrase while a context is set | The typed suffix as `$1`; no arg on bare phrase (script reads `NIMBLE_CONTEXT`) |
 
 **`none`** — good for static or slow-changing data that does not need filtering.  
 **`optional`** — good for searchable lists where seeing all items first is useful.  
-**`required`** — good for queries that only make sense with user input (e.g. search, lookup).
+**`required`** — good for queries that only make sense with user input (e.g. search, lookup).  
+**`context`** — good for context-aware queries where the active context is the default input and a typed suffix overrides it (see [`arg: context`](#arg-context)).
 
 ---
 

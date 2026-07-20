@@ -46,6 +46,7 @@ pub enum ItemAction {
     PasteText,
     CopyText,
     OpenUrl,
+    CtxSet,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -65,6 +66,11 @@ pub enum ArgMode {
     None,
     Optional,
     Required,
+    /// Like `Required`, but an active context satisfies the requirement.
+    /// A typed suffix still overrides and is passed as the positional arg;
+    /// with no suffix but an active context the command fires with no
+    /// positional arg (the script reads NIMBLE_CONTEXT instead).
+    Context,
 }
 
 fn default_arg_mode() -> ArgMode {
@@ -1661,6 +1667,23 @@ mod tests {
         }
     }
 
+    #[test]
+    fn parses_dynamic_list_command_context_arg() {
+        let dir = TempDir::new().unwrap();
+        write_yaml(
+            &dir,
+            "dyn.yaml",
+            "phrase: search things\ntitle: Search\naction:\n  type: dynamic_list\n  config:\n    script: search.sh\n    arg: context\n    item_action: paste_text\n",
+        );
+        let result = load_from_dir(dir.path(), true, false, "shared").unwrap();
+        if let Action::DynamicList(cfg) = &result.commands[0].action {
+            assert_eq!(cfg.arg, ArgMode::Context);
+            assert_eq!(cfg.item_action, Some(ItemAction::PasteText));
+        } else {
+            panic!("expected DynamicList action");
+        }
+    }
+
     // ── run_script ────────────────────────────────────────────────────────────
 
     fn test_env(dir: &TempDir) -> ScriptEnv<'static> {
@@ -1843,6 +1866,23 @@ mod tests {
         let result = load_from_dir(dir.path(), true, false, "shared").unwrap();
         if let Action::ScriptAction(cfg) = &result.commands[0].action {
             assert_eq!(cfg.arg, ArgMode::Required);
+            assert_eq!(cfg.result_action, ResultAction::OpenUrl);
+        } else {
+            panic!("expected ScriptAction action");
+        }
+    }
+
+    #[test]
+    fn parses_script_action_command_context_arg() {
+        let dir = TempDir::new().unwrap();
+        write_yaml(
+            &dir,
+            "sa.yaml",
+            "phrase: open urls\ntitle: Open URLs\naction:\n  type: script_action\n  config:\n    script: urls.sh\n    arg: context\n    result_action: open_url\n",
+        );
+        let result = load_from_dir(dir.path(), true, false, "shared").unwrap();
+        if let Action::ScriptAction(cfg) = &result.commands[0].action {
+            assert_eq!(cfg.arg, ArgMode::Context);
             assert_eq!(cfg.result_action, ResultAction::OpenUrl);
         } else {
             panic!("expected ScriptAction action");
@@ -2648,6 +2688,22 @@ mod tests {
     }
 
     #[test]
+    fn parses_static_list_command_with_item_action_ctx_set() {
+        let dir = TempDir::new().unwrap();
+        write_yaml(
+            &dir,
+            "show.yaml",
+            "phrase: pick customer\ntitle: Customers\naction:\n  type: static_list\n  config:\n    list: customers\n    item_action: ctx_set\n",
+        );
+        let result = load_from_dir(dir.path(), true, false, "shared").unwrap();
+        if let Action::StaticList(cfg) = &result.commands[0].action {
+            assert_eq!(cfg.item_action, Some(ItemAction::CtxSet));
+        } else {
+            panic!("expected StaticList action");
+        }
+    }
+
+    #[test]
     fn parses_dynamic_list_optional_with_item_action_copy_text() {
         let dir = TempDir::new().unwrap();
         write_yaml(
@@ -2693,6 +2749,23 @@ mod tests {
         if let Action::DynamicList(cfg) = &result.commands[0].action {
             assert_eq!(cfg.arg, ArgMode::None);
             assert_eq!(cfg.item_action, Some(ItemAction::PasteText));
+        } else {
+            panic!("expected DynamicList action");
+        }
+    }
+
+    #[test]
+    fn parses_dynamic_list_optional_with_item_action_ctx_set() {
+        let dir = TempDir::new().unwrap();
+        write_yaml(
+            &dir,
+            "dyn.yaml",
+            "phrase: search customers\ntitle: Search\naction:\n  type: dynamic_list\n  config:\n    script: search.sh\n    arg: optional\n    item_action: ctx_set\n",
+        );
+        let result = load_from_dir(dir.path(), true, false, "shared").unwrap();
+        if let Action::DynamicList(cfg) = &result.commands[0].action {
+            assert_eq!(cfg.arg, ArgMode::Optional);
+            assert_eq!(cfg.item_action, Some(ItemAction::CtxSet));
         } else {
             panic!("expected DynamicList action");
         }

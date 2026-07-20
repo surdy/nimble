@@ -143,21 +143,34 @@ fn restore_previous_app(_id: String) {}
 
 // ── Pure helpers (no Tauri runtime needed — fully testable) ──────────────────
 
+/// Percent-encode `value` for safe inclusion in a URL (`application/x-www-form-urlencoded`
+/// style — spaces become `+`, other reserved/non-ASCII bytes become `%XX`).
+fn url_encode_component(value: &str) -> String {
+    value
+        .bytes()
+        .flat_map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9'
+            | b'-' | b'_' | b'.' | b'~' => vec![b as char],
+            b' ' => vec!['+'],
+            _ => format!("%{:02X}", b).chars().collect(),
+        })
+        .collect()
+}
+
+/// Substitute every `{context}` token in `url` with the URL-encoded active
+/// context value. When `context` is `None` (no active context), `{context}`
+/// is replaced with an empty string rather than left untouched.
+pub(crate) fn substitute_context(url: String, context: Option<String>) -> String {
+    let encoded = context.map(|c| url_encode_component(&c)).unwrap_or_default();
+    url.replace("{context}", &encoded)
+}
+
 /// URL-encode `param` and substitute it for every `{param}` token in `url`,
 /// then validate the resulting URL has a well-formed scheme (RFC 3986).
 /// Returns the resolved URL string on success.
 pub(crate) fn resolve_url(url: String, param: Option<String>) -> Result<String, String> {
     let resolved = if let Some(p) = param {
-        let encoded: String = p
-            .bytes()
-            .flat_map(|b| match b {
-                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9'
-                | b'-' | b'_' | b'.' | b'~' => vec![b as char],
-                b' ' => vec!['+'],
-                _ => format!("%{:02X}", b).chars().collect(),
-            })
-            .collect();
-        url.replace("{param}", &encoded)
+        url.replace("{param}", &url_encode_component(&p))
     } else {
         url
     };
@@ -505,14 +518,26 @@ fn write_clipboard_text(text: &str) -> Result<(), String> {
 }
 
 /// Open a URL in the default browser or the registered handler for its scheme.
+///
+/// `{param}` is substituted from typed text (unchanged behaviour); `{context}`
+/// is substituted from the frontend's active context, or an empty string when
+/// no context is set. Both tokens may appear in the same URL.
 #[tauri::command]
-fn open_url(app: tauri::AppHandle, url: String, param: Option<String>) -> Result<(), String> {
-    let resolved = resolve_url(url.clone(), param.clone())?;
+fn open_url(
+    app: tauri::AppHandle,
+    url: String,
+    param: Option<String>,
+    context: Option<String>,
+) -> Result<(), String> {
+    let with_context = substitute_context(url.clone(), context.clone());
+    let resolved = resolve_url(with_context, param.clone())?;
     if app.state::<DebugState>().0.load(std::sync::atomic::Ordering::Relaxed) {
         if let Ok(config_dir) = app.path().app_config_dir() {
             debug_log::log(
                 &config_dir,
-                &format!("[ACTION] open_url url={url:?} param={param:?} resolved={resolved:?}"),
+                &format!(
+                    "[ACTION] open_url url={url:?} param={param:?} context={context:?} resolved={resolved:?}"
+                ),
             );
         }
     }
@@ -829,8 +854,9 @@ fn save_command_file(
             if url.is_empty() {
                 return Err("URL must not be empty".to_string());
             }
-            // Validate scheme (reuse existing helper for final URLs; {param} is a placeholder)
+            // Validate scheme (reuse existing helper for final URLs; {param}/{context} are placeholders)
             let test_url = url.replace("{param}", "TEST");
+            let test_url = substitute_context(test_url, Some("TEST".to_string()));
             resolve_url(test_url, None)?;
             format!("type: open_url\n  config:\n    url: {}", serde_yaml::to_string(&url).unwrap_or_default().trim())
         }
@@ -1741,6 +1767,61 @@ mod tests {
         )
         .unwrap();
         assert_eq!(r, "https://example.com");
+    }
+
+    // ── substitute_context ────────────────────────────────────────────────────
+
+    #[test]
+    fn context_substitution_with_value() {
+        let r = substitute_context(
+            "https://example.com/{context}/dashboard".into(),
+            Some("acme".into()),
+        );
+        assert_eq!(r, "https://example.com/acme/dashboard");
+    }
+
+    #[test]
+    fn context_substitution_with_no_context_uses_empty_string() {
+        let r = substitute_context(
+            "https://example.com/{context}/dashboard".into(),
+            None,
+        );
+        assert_eq!(r, "https://example.com//dashboard");
+    }
+
+    #[test]
+    fn context_substitution_encodes_special_chars() {
+        let r = substitute_context(
+            "https://example.com/search?ctx={context}".into(),
+            Some("a b&c".into()),
+        );
+        assert_eq!(r, "https://example.com/search?ctx=a+b%26c");
+    }
+
+    #[test]
+    fn context_substitution_ignored_when_no_placeholder() {
+        let r = substitute_context("https://example.com".into(), Some("acme".into()));
+        assert_eq!(r, "https://example.com");
+    }
+
+    #[test]
+    fn url_with_both_param_and_context_tokens() {
+        let with_context = substitute_context(
+            "https://example.com/{context}/search?q={param}".into(),
+            Some("acme".into()),
+        );
+        let r = resolve_url(with_context, Some("hello world".into())).unwrap();
+        assert_eq!(r, "https://example.com/acme/search?q=hello+world");
+    }
+
+    #[test]
+    fn url_with_both_tokens_and_no_context() {
+        let with_context = substitute_context(
+            "https://example.com/{context}/search?q={param}".into(),
+            None,
+        );
+        let r = resolve_url(with_context, Some("cats".into())).unwrap();
+        assert_eq!(r, "https://example.com//search?q=cats");
     }
 
     // ── validate_text ──────────────────────────────────────────────────────────

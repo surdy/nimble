@@ -19,7 +19,7 @@ action:
   config:
     script: <string>      # script filename co-located with this YAML (no path separators),
                           # or shared:<name> to reference a script in the shared directory
-    arg: none | optional | required   # default: none
+    arg: none | optional | required | context   # default: none
     result_action: open_url | paste_text | copy_text
     prefix: <string>      # optional — prepended to each value (paste_text / copy_text only)
     suffix: <string>      # optional — appended to each value (paste_text / copy_text only)
@@ -68,6 +68,7 @@ Set `arg` to let the user supply input after the phrase:
 | `none` (default) | Script always runs with no argument; any text after the phrase is ignored. |
 | `optional` | If the user types text after the phrase, it is passed to the script as `$1`; otherwise the script runs without an argument. |
 | `required` | The command only executes when the user has typed text after the phrase. |
+| `context` | Like `required`, but an [active context](../guides/contexts.md) also satisfies the requirement. |
 
 ```yaml
 phrase: open repo
@@ -81,6 +82,29 @@ action:
 ```
 
 Type `open repo myorg/myrepo` → `get-repo-url.sh myorg/myrepo` → opens the returned URL.
+
+### `arg: context`
+
+`context` mode is "required, but an active context satisfies the requirement". A typed suffix is always an explicit override and is passed as `$1`. When no suffix is typed, the command still fires as long as a context is active — but the context value is **never** passed as the positional argument; the script reads it from the [`NIMBLE_CONTEXT`](../guides/writing-scripts.md#built-in-environment-variables) environment variable instead.
+
+| State | Fires on Enter? | Script receives |
+|-------|-----------------|-----------------|
+| Suffix typed | Yes | `$1` = the typed suffix (explicit override) |
+| No suffix, context set | Yes | no positional arg; script reads `NIMBLE_CONTEXT` |
+| No suffix, no context | No | — |
+
+```yaml
+phrase: deploy service
+title: Deploy for environment…
+action:
+  type: script_action
+  config:
+    script: deploy.sh
+    arg: context
+    result_action: copy_text
+```
+
+With context `staging` active, typing `deploy service` and pressing **Enter** runs `deploy.sh` with no argument and `NIMBLE_CONTEXT=staging`. Typing `deploy service prod` instead runs `deploy.sh prod`, overriding the context.
 
 ---
 

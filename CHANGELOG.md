@@ -5,6 +5,19 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [1.3.0] — 2026-07-19
+
+### Added
+- **`arg: context` mode** for `script_action` and `dynamic_list` commands — required, but an active context satisfies the requirement: a typed suffix is passed as the script argument (explicit override), the bare phrase fires with no argument when a context is set (the script reads `NIMBLE_CONTEXT`), and the command shows a hint row when neither is available. Dynamic lists keep full required-mode behavior (re-invoke per suffix, Tab-to-lock) and re-invoke when the context changes
+- **`item_action: ctx_set`** for static and dynamic lists — selecting an item sets the active context to its value and keeps the launcher open, enabling pick-from-a-list context switching
+- **`{context}` URL token** for `open_url` commands — substitutes the active context (URL-encoded; empty string when unset), alongside `{param}`
+
+### Changed
+- **Context is now ambient-only** (breaking) — the active context is no longer appended to typed input: command matching and parameters use exactly what you type, and context reaches commands only via `NIMBLE_CONTEXT`, `arg: context`, and `{context}`. Context-driven phrase completion is removed
+- Authoring spec bumped to `spec_version` 17
+
+---
+
 ## [1.2.0] — 2026-05-05
 
 ### Added

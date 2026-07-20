@@ -5,10 +5,10 @@
 # All Copilot skills and documentation should derive schema knowledge
 # from this file.
 #
-# Last updated: 2026-04-19
-# Spec version: 16
+# Last updated: 2026-07-19
+# Spec version: 17
 
-spec_version: 16
+spec_version: 17
 
 # ── Config directory locations ──────────────────────────────────────────
 config_dirs:
@@ -74,12 +74,16 @@ action_types:
         required: true
         description: >
           Any valid URL. Use {param} as a placeholder for user-supplied input
-          typed after the phrase.
+          typed after the phrase. Use {context} as a placeholder for the
+          active context value; it is substituted with an empty string when
+          no context is set. Both tokens may appear in the same URL and are
+          both URL-encoded when substituted.
     example: |
       action:
         type: open_url
         config:
           url: https://www.google.com/search?q={param}
+      # {context} is also supported, e.g. url: https://{context}.example.com/dashboard
 
   paste_text:
     description: "Paste a predefined text string into the previously focused app."
@@ -119,12 +123,14 @@ action_types:
           Plain name (co-located with command YAML, .tsv auto-appended),
           or shared:<name> to reference a file in the shared directory.
       item_action:
-        type: "enum: paste_text | copy_text | open_url"
+        type: "enum: paste_text | copy_text | open_url | ctx_set"
         required: false
         default: null
         description: >
           Action performed when a list item is selected. If absent, selecting
-          an item dismisses the launcher without further action.
+          an item dismisses the launcher without further action. ctx_set sets
+          the active context to the item's value and clears the input, but
+          does NOT dismiss the launcher (same behavior as the /ctx set builtin).
     list_file_format: |
       # TSV file: one item per line, tab separates title from optional subtext.
       # Lines starting with # are comments. Blank lines are ignored.
@@ -152,17 +158,37 @@ action_types:
           Script filename (co-located with command YAML), or shared:<name>
           to reference a script in the shared directory.
       arg:
-        type: "enum: none | optional | required"
+        type: "enum: none | optional | required | context"
         required: false
         default: none
-        description: "Controls whether the script receives a user-typed suffix argument."
+        description: >
+          Controls whether the script receives a user-typed suffix argument.
+          - none: never pass an argument; list appears on exact phrase match.
+          - optional: list appears on exact match or with a suffix; suffix
+            passed as $1 when present.
+          - required: list appears only when a suffix is typed; suffix is $1.
+          - context: like required, but an active context also satisfies the
+            requirement. A typed suffix always overrides and is passed as $1
+            (re-invoked with the 200ms debounce as it changes, exactly like
+            required — it is a replacement input, NOT a filter); with no
+            suffix but an active context the script runs IMMEDIATELY (no
+            debounce) with NO positional argument (it reads NIMBLE_CONTEXT).
+            The context value is never passed as the positional argument.
+            Firing table (suffix typed -> runs, $1 = suffix; no suffix +
+            context set -> runs, no arg, read NIMBLE_CONTEXT; no suffix + no
+            context -> does not run). Results cached under one context are
+            treated as stale when the active context changes (deep link,
+            chip clear, ctx_set) and the script is re-invoked. Tab/-> arg
+            locking works as in required mode.
       item_action:
-        type: "enum: paste_text | copy_text | open_url"
+        type: "enum: paste_text | copy_text | open_url | ctx_set"
         required: false
         default: null
         description: >
           Action performed when a list item is selected. If absent, selecting
-          an item dismisses the launcher without further action.
+          an item dismisses the launcher without further action. ctx_set sets
+          the active context to the item's value and clears the input, but
+          does NOT dismiss the launcher (same behavior as the /ctx set builtin).
     co_location: "Command YAML + script in the same directory."
     example: |
       action:
@@ -182,10 +208,22 @@ action_types:
           Script filename (co-located with command YAML), or shared:<name>
           to reference a script in the shared directory.
       arg:
-        type: "enum: none | optional | required"
+        type: "enum: none | optional | required | context"
         required: false
         default: none
-        description: "Controls whether the script receives a user-typed suffix argument."
+        description: >
+          Controls whether the script receives a user-typed suffix argument.
+          - none: never pass an argument.
+          - optional: pass the typed suffix as $1 when present.
+          - required: only fire when a suffix is typed; pass it as $1.
+          - context: like required, but an active context also satisfies the
+            requirement. A typed suffix always overrides and is passed as $1;
+            with no suffix but an active context the command fires with NO
+            positional argument (the script reads NIMBLE_CONTEXT). The context
+            value is never passed as the positional argument. Firing table
+            (suffix typed -> fires, $1 = suffix; no suffix + context set ->
+            fires, no arg, read NIMBLE_CONTEXT; no suffix + no context -> does
+            not fire).
       result_action:
         type: "enum: open_url | paste_text | copy_text"
         required: true
@@ -358,9 +396,10 @@ environment_variables:
 # ── Contexts ───────────────────────────────────────────────────────────
 contexts:
   description: >
-    A context is a word/phrase silently appended to every typed command,
-    narrowing matching to a particular topic.
-  matching_rule: "effective input = raw input + ' ' + context (unless raw input is already in param mode for a known command, in which case context is not appended)"
+    A context is an ambient word/phrase carried alongside the launcher.
+    It never influences command matching or parameters; scripts read it
+    via the NIMBLE_CONTEXT environment variable.
+  matching_rule: "Matching and params always use exactly the typed input; the active context is never appended to it."
   builtin_commands:
     - command: "/ctx set <value>"
       description: "Sets the active context."
@@ -388,9 +427,10 @@ contexts:
       - "The app updates state.json and emits a frontend event upon receiving a link."
   design_notes:
     - "Phrases starting with / are reserved for built-in commands."
-    - "Context is invisible in the input bar — only matching is affected."
-    - "When no context is set, the launcher behaves as usual."
-    - "When the user types a command phrase + extra text (parameter), context is not appended to avoid polluting params. Scripts can read context via NIMBLE_CONTEXT env var."
+    - "Context is ambient-only: it never affects matching and never becomes a positional argument or {param} value."
+    - "Scripts receive the active context via the NIMBLE_CONTEXT env var (empty string when unset)."
+    - "open_url commands can read context via the {context} URL token. Substituted with an empty string when no context is set."
+    - "The context chip in the launcher bar shows the active value (toggle with show_context_chip)."
     - "Context persists across app restarts via state.json."
     - "External apps can read state.json and write via nimble:// deep links."
 
@@ -548,3 +588,11 @@ changelog:
     date: "2026-04-19"
     changes:
       - "Added missing script_action action type definition with full config schema and example."
+  - version: 17
+    date: "2026-07-19"
+    changes:
+      - "Context is now ambient-only: it is never appended to typed input, never influences matching, and never becomes a param or script arg. Scripts read it via NIMBLE_CONTEXT."
+      - "Added ctx_set item_action for static_list/dynamic_list: sets the active context to the selected item's value and clears the input, without dismissing the launcher (same behavior as the /ctx set builtin)."
+      - "Added {context} URL token for open_url commands: substitutes the active context value (URL-encoded), or an empty string when no context is set. Independent of {param}; both tokens may appear in the same URL."
+      - "Added arg: context mode for script_action: like required, but an active context satisfies the requirement. A typed suffix overrides and is passed as $1; with no suffix but an active context the command fires with no positional argument (script reads NIMBLE_CONTEXT); with neither it does not fire. The context is never passed as the positional argument."
+      - "Added arg: context mode for dynamic_list: same semantics as script_action's. With a typed suffix it behaves exactly like required (suffix is $1, debounced re-invoke, Tab/-> arg locking); on the bare phrase with an active context the script runs immediately with no arg (reads NIMBLE_CONTEXT); with neither it does not run. Cached results are invalidated and the script re-invoked when the active context changes."

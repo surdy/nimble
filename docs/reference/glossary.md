@@ -10,7 +10,7 @@ Quick definitions for terms used throughout the Nimble documentation.
 | **Phrase** | The multi-word string you type to trigger a command (e.g. `open github`, `search google`). Matching is case-insensitive and works on partial input. |
 | **Subtext** | The secondary line shown below a result's title. In lists, subtext also serves as the value used for the item action (paste, copy, or open). |
 | **Param / `{param}`** | The text the user types after a matched phrase. Substituted into `open_url` URLs or passed as an argument to scripts. Nimble URL-encodes the value automatically. |
-| **Context** | A persistent word or phrase silently appended to every query, narrowing matches to a topic. Set with `/ctx set <value>`, cleared with `/ctx reset`. |
+| **Context** | An ambient word or phrase exposed to scripts via the `NIMBLE_CONTEXT` environment variable; it never affects matching or parameters. Set with `/ctx set <value>`, cleared with `/ctx reset`. |
 | **Config directory** | The platform-specific folder where Nimble reads commands, lists, scripts, and settings (`~/Library/Application Support/nimble/` on macOS). |
 | **Commands directory** | The `commands/` subfolder inside the config directory. Each `.yaml` file here defines one command. |
 | **Co-located file** | A script or list file that lives in the same directory as its command YAML (e.g. `commands/say-hello/hello.sh` alongside `say-hello.yaml`). |

@@ -4,7 +4,7 @@
   import { getCurrentWindow, LogicalSize } from "@tauri-apps/api/window";
   import { listen, emit } from "@tauri-apps/api/event";
   import type { Action, AppSettings, Command, CommandFileMeta, CommandsPayload, CommandWarning, DuplicateWarning, ListItem, ReservedPhraseWarning, SkippedFileWarning } from "$lib/types";
-  import { actionBadge, highlight, eventToShortcut, shortenPath, filterCommands, isParamMode, computeEffectiveInput, fuzzyFilterListItems } from "$lib/helpers";
+  import { actionBadge, highlight, eventToShortcut, shortenPath, filterCommands, fuzzyFilterListItems } from "$lib/helpers";
 
   // ── State ──────────────────────────────────────────────────────────────
   let input = $state("");
@@ -393,7 +393,7 @@
     },
     {
       phrase: "/docs contexts",
-      title: "Contexts — scoped matching with /ctx set and /ctx reset",
+      title: "Contexts — ambient value for scripts via /ctx set and /ctx reset",
       env: {}, source_dir: "",
       action: { type: "builtin", config: { action: "docs_open", url: "https://github.com/surdy/nimble/blob/main/docs/guides/contexts.md" } },
     },
@@ -450,26 +450,27 @@
   let fullListItems = $state<ListItem[]>([]);
   let listLoadedPhrase = $state<string | null>(null); // tracks which command phrase the list was loaded for
   let scriptInvokedArg = $state(""); // the arg passed to the script (for arg:required); fuzzy filter is relative to this
+  // The active context at the time the script was invoked. Only consulted for
+  // arg:context dynamic_list commands: their results depend on NIMBLE_CONTEXT,
+  // so a context change (deep link, chip clear, ctx_set) invalidates the cache.
+  let scriptInvokedContext = $state("");
 
-  // For arg:required dynamic_list: when non-null, the user has pressed Tab/→
-  // to "commit" this string as the script's arg. Subsequent typing after
-  // `committedArg + " "` is treated as a client-side fuzzy filter rather than
-  // a new arg (no script re-invocation). Backspacing past the committed arg
-  // releases the lock and re-enables live re-invocation.
+  // For arg:required / arg:context dynamic_list: when non-null, the user has
+  // pressed Tab/→ to "commit" this string as the script's arg. Subsequent
+  // typing after `committedArg + " "` is treated as a client-side fuzzy filter
+  // rather than a new arg (no script re-invocation). Backspacing past the
+  // committed arg releases the lock and re-enables live re-invocation.
   let committedArg = $state<string | null>(null);
 
-  // Auto-release the lock whenever we leave a dynamic_list arg:required match.
+  // Auto-release the lock whenever we leave a dynamic_list arg:required /
+  // arg:context match.
   $effect(() => {
-    if (
-      committedArg !== null &&
-      (
-        !activeListCmd ||
-        activeListCmd.action.type !== "dynamic_list" ||
-        (activeListCmd.action.config.arg ?? "none") !== "required"
-      )
-    ) {
-      committedArg = null;
+    if (committedArg === null) return;
+    if (activeListCmd && activeListCmd.action.type === "dynamic_list") {
+      const mode = activeListCmd.action.config.arg ?? "none";
+      if (mode === "required" || mode === "context") return;
     }
+    committedArg = null;
   });
 
   // ── Filtering & navigation ─────────────────────────────────────────────
@@ -478,17 +479,12 @@
 
 
 
-  // When a context is active and the user is not typing a / command, append
-  // the context to raw input so commands are matched against the full phrase.
-  // However, if the raw input already places us in "param mode" for a known
-  // command (i.e. the user typed the full phrase + extra text), do NOT append
-  // context — the trailing text is a user-supplied parameter, not a phrase
-  // fragment.  Scripts can still read the context via NIMBLE_CONTEXT env var.
-  const rawInParamMode = $derived(isParamMode(input, commands));
+  // Trimmed typed input — the sole source for command matching and params.
+  // The active context never influences matching; it is ambient-only and
+  // scripts read it via the NIMBLE_CONTEXT env var.
+  const typedInput = $derived(input.trim());
 
-  const effectiveInput = $derived(computeEffectiveInput(input, activeContext, commands));
-
-  const filtered = $derived(filterCommands(commands, effectiveInput));
+  const filtered = $derived(filterCommands(commands, typedInput));
 
   // Built-in / commands filtered by the current raw input (only when input starts with "/")
   const filteredBuiltins: Command[] = $derived(
@@ -528,10 +524,9 @@
   });
 
   // Detect exact-phrase match for static_list / dynamic_list commands and load items.
-  // Uses effectiveInput so context-suffixed phrases are matched correctly.
   // Returns a cleanup that cancels any in-flight debounce timer.
   $effect(() => {
-    const typed = effectiveInput.toLowerCase();
+    const typed = typedInput.toLowerCase();
 
     // ── static_list: exact match or prefix (phrase + space + filter) ───
     const staticMatch = commands.find(
@@ -615,6 +610,15 @@
       const isExact = typed === phrase;
       const suffix = typed.startsWith(phrase + " ") ? typed.slice(phrase.length + 1).trim() : "";
       const argMode = config.arg ?? "none";
+      // "context" is required-LIKE: a typed suffix IS the script's arg (never
+      // a client-side filter), so it shares all of arg:required's guards. The
+      // difference is that with no suffix an active context satisfies the
+      // requirement (invoke with arg null; the script reads NIMBLE_CONTEXT).
+      const requiredLike = argMode === "required" || argMode === "context";
+      // For arg:context, results loaded under a different active context are
+      // stale — the script's output depends on NIMBLE_CONTEXT, and the context
+      // can change without the input being retyped (deep link, chip clear).
+      const contextFresh = argMode !== "context" || scriptInvokedContext === activeContext;
 
       // When the match is via prefix (not exact), check if the typed text
       // also partially matches a longer command phrase that extends this one.
@@ -637,23 +641,23 @@
 
       // For arg:none and arg:optional: if results are already loaded for this
       // phrase, fuzzy-filter client-side instead of re-invoking the script.
-      // For arg:required, the suffix IS the script's arg — we must re-invoke
-      // when the suffix changes (handled below).
-      if (argMode !== "required" && listLoadedPhrase === phrase && dynamicListLoaded) {
+      // For arg:required / arg:context, the suffix IS the script's arg — we
+      // must re-invoke when the suffix changes (handled below).
+      if (!requiredLike && listLoadedPhrase === phrase && dynamicListLoaded) {
         activeListCmd = dynMatch;
         listItems = fuzzyFilterListItems(fullListItems, suffix);
         selectedIndex = 0;
         return;
       }
 
-      // For arg:required, decide what is the "effective arg" sent to the
-      // script vs the client-side fuzzy filter applied on top of cached
-      // results. When committedArg is set, the suffix is split:
+      // For arg:required / arg:context, decide what is the "effective arg"
+      // sent to the script vs the client-side fuzzy filter applied on top of
+      // cached results. When committedArg is set, the suffix is split:
       //   <committedArg> [<filter text>]
       // and the script is NOT re-invoked while the locked prefix matches.
       let requiredArg = suffix;
       let requiredFilter = "";
-      if (argMode === "required" && committedArg !== null) {
+      if (requiredLike && committedArg !== null) {
         if (suffix === committedArg) {
           requiredArg = committedArg;
           requiredFilter = "";
@@ -670,13 +674,15 @@
         }
       }
 
-      // For arg:required, if the script has already been invoked for the
-      // effective arg, just fuzzy-filter the cached results.
+      // For arg:required / arg:context, if the script has already been
+      // invoked for the effective arg (and, for arg:context, under the
+      // current active context), just fuzzy-filter the cached results.
       if (
-        argMode === "required" &&
+        requiredLike &&
         listLoadedPhrase === phrase &&
         dynamicListLoaded &&
-        scriptInvokedArg === requiredArg
+        scriptInvokedArg === requiredArg &&
+        contextFresh
       ) {
         activeListCmd = dynMatch;
         listItems = requiredFilter
@@ -686,24 +692,25 @@
         return;
       }
 
-      // For arg:required, if a script is currently running for the effective
-      // arg, wait for it to resolve.
+      // For arg:required / arg:context, if a script is currently running for
+      // the effective arg (and current context), wait for it to resolve.
       if (
-        argMode === "required" &&
+        requiredLike &&
         listLoadedPhrase === phrase &&
         scriptLoadingState !== "idle" &&
-        scriptInvokedArg === requiredArg
+        scriptInvokedArg === requiredArg &&
+        contextFresh
       ) {
         activeListCmd = dynMatch;
         return;
       }
 
       // If a script is already running for this phrase (and the suffix hasn't
-      // changed for arg:required), wait for the promise to resolve.
+      // changed for arg:required/context), wait for the promise to resolve.
       // (runDynamic sets listLoadedPhrase and scriptLoadingState synchronously,
       // which re-triggers this $effect; without this guard, the fall-through
       // would schedule another invocation.)
-      if (argMode !== "required" && listLoadedPhrase === phrase && scriptLoadingState !== "idle") {
+      if (!requiredLike && listLoadedPhrase === phrase && scriptLoadingState !== "idle") {
         activeListCmd = dynMatch;
         return;
       }
@@ -717,6 +724,7 @@
         dynamicListLoaded = false;
         listLoadedPhrase = phrase;
         scriptInvokedArg = arg ?? "";
+        scriptInvokedContext = activeContext;
         scriptLoadingState = "running";
         let slowTimer = setTimeout(() => { scriptLoadingState = "slow"; }, 2000);
         let verySlowTimer = setTimeout(() => { scriptLoadingState = "very_slow"; }, 4000);
@@ -726,13 +734,13 @@
             scriptLoadingState = "idle";
             fullListItems = items;
             dynamicListLoaded = true;
-            // For arg:required, the script's results are already filtered by
-            // the arg — apply client-side fuzzy filtering only if the user
-            // has committed an arg (locked) and is now typing extra filter
-            // text after it. For arg:none/optional, always fuzzy-filter using
-            // the current suffix.
-            if (argMode === "required") {
-              const currentTyped = effectiveInput.toLowerCase();
+            // For arg:required / arg:context, the script's results are
+            // already filtered by the arg — apply client-side fuzzy filtering
+            // only if the user has committed an arg (locked) and is now typing
+            // extra filter text after it. For arg:none/optional, always
+            // fuzzy-filter using the current suffix.
+            if (requiredLike) {
+              const currentTyped = typedInput.toLowerCase();
               const currentSuffix = currentTyped.startsWith(phrase + " ") ? currentTyped.slice(phrase.length + 1).trim() : "";
               let filterText = "";
               if (committedArg !== null) {
@@ -744,7 +752,7 @@
               }
               listItems = filterText ? fuzzyFilterListItems(items, filterText) : items;
             } else {
-              const currentTyped = effectiveInput.toLowerCase();
+              const currentTyped = typedInput.toLowerCase();
               const currentSuffix = currentTyped.startsWith(phrase + " ") ? currentTyped.slice(phrase.length + 1).trim() : "";
               listItems = fuzzyFilterListItems(items, currentSuffix);
             }
@@ -772,8 +780,23 @@
       } else if (argMode === "optional") {
         activeListCmd = dynMatch;
         runDynamic(null);
+      } else if (argMode === "context" && !requiredArg) {
+        // context mode with no typed suffix: an active context satisfies the
+        // requirement — invoke immediately (nothing is being typed, so no
+        // debounce) with arg null; the script reads NIMBLE_CONTEXT. Without
+        // a context the requirement is unmet: no invocation, no list.
+        if (activeContext.trim() !== "") {
+          activeListCmd = dynMatch;
+          runDynamic(null);
+        } else {
+          activeListCmd = null;
+          listItems = [];
+          dynamicListLoaded = false;
+          scriptLoadingState = "idle";
+        }
       } else {
-        // required: only invoke when the effective arg is non-empty.
+        // required (or context with a typed suffix): only invoke when the
+        // effective arg is non-empty, debounced because it is being typed.
         // (When committedArg is set, requiredArg === committedArg and the
         // earlier cache/in-flight guards usually short-circuit before here.)
         if (requiredArg) {
@@ -797,6 +820,7 @@
     fullListItems = [];
     listLoadedPhrase = null;
     scriptInvokedArg = "";
+    scriptInvokedContext = "";
     dynamicListLoaded = false;
     scriptLoadingState = "idle";
     showingDebugLog = false;
@@ -1310,8 +1334,11 @@ echo "Hello, world!"
     } else if (itemAction === "copy_text") {
       await invoke("copy_text", { text: value });
     } else if (itemAction === "open_url") {
-      await invoke("open_url", { url: value, param: null });
+      await invoke("open_url", { url: value, param: null, context: activeContext });
       dismiss();
+    } else if (itemAction === "ctx_set") {
+      activeContext = value;
+      // do NOT dismiss — launcher stays open so the user sees the updated context
     } else {
       // No action configured — just dismiss
       invoke("dismiss_launcher").catch(() => appWindow.hide());
@@ -1321,16 +1348,17 @@ echo "Hello, world!"
   async function executeCommand(cmd: Command) {
     if (cmd.action.type === "open_url") {
       // Extract any text typed after the command phrase as the param.
-      // effectiveInput includes context only when no param is present,
-      // so params are never polluted by the active context.
+      // Only what the user explicitly typed becomes the param — the active
+      // context is ambient-only and never injected here.
       const phrase = cmd.phrase.toLowerCase();
-      const typed  = effectiveInput;
+      const typed  = typedInput;
       const after  = typed.toLowerCase().startsWith(phrase)
         ? typed.slice(phrase.length).trim()
         : "";
       await invoke("open_url", {
-        url:   cmd.action.config.url,
-        param: after !== "" ? after : null,
+        url:     cmd.action.config.url,
+        param:   after !== "" ? after : null,
+        context: activeContext,
       });
       dismiss();
     } else if (cmd.action.type === "paste_text") {
@@ -1346,9 +1374,9 @@ echo "Hello, world!"
     } else if (cmd.action.type === "script_action") {
       const cfg = cmd.action.config;
       const phrase = cmd.phrase.toLowerCase();
-      // effectiveInput excludes context when a param is present,
-      // so script args contain only what the user explicitly typed.
-      const typed  = effectiveInput;
+      // Script args contain only what the user explicitly typed after the
+      // phrase; the active context reaches scripts via NIMBLE_CONTEXT only.
+      const typed  = typedInput;
       const after  = typed.toLowerCase().startsWith(phrase)
         ? typed.slice(phrase.length).trim()
         : "";
@@ -1360,6 +1388,18 @@ echo "Hello, world!"
       } else if (cfg.arg === "required") {
         if (after === "") return; // can't execute without a required argument
         scriptArg = after;
+      } else if (cfg.arg === "context") {
+        // Required, but an active context satisfies the requirement.
+        // A typed suffix overrides and is passed as the arg; with no suffix
+        // the command fires only when a context is set, passing arg = null so
+        // the script reads NIMBLE_CONTEXT. The context value is NEVER passed
+        // as the positional arg.
+        if (after !== "") {
+          scriptArg = after;
+        } else if (activeContext.trim() === "") {
+          return; // no suffix and no context: refuse
+        }
+        // else: no suffix, context set — scriptArg stays null
       }
       // arg === "none" (or absent): scriptArg stays null
 
@@ -1380,7 +1420,7 @@ echo "Hello, world!"
 
       if (cfg.result_action === "open_url") {
         for (const v of values) {
-          await invoke("open_url", { url: v, param: null });
+          await invoke("open_url", { url: v, param: null, context: activeContext });
         }
         dismiss();
       } else {
@@ -1411,7 +1451,7 @@ echo "Hello, world!"
         input = "";
         // do NOT dismiss
       } else if (builtinAction === "docs_open" && cmd.action.config.url) {
-        await invoke("open_url", { url: cmd.action.config.url, param: null });
+        await invoke("open_url", { url: cmd.action.config.url, param: null, context: activeContext });
         input = "";
         dismissWithFocusRestore();
       } else if (builtinAction === "deploy_skill") {
@@ -1476,12 +1516,12 @@ echo "Hello, world!"
   // ── Launcher key handling ──────────────────────────────────────────────
 
   /**
-   * Commit the current suffix as the locked arg for an arg:required
-   * dynamic_list. Returns true when a commit happened (so the caller can
-   * stop further key handling).
+   * Commit the current suffix as the locked arg for an arg:required (or
+   * arg:context) dynamic_list. Returns true when a commit happened (so the
+   * caller can stop further key handling).
    *
    * Preconditions:
-   *  - active match is a dynamic_list with `arg: required`
+   *  - active match is a dynamic_list with `arg: required` or `arg: context`
    *  - the script has resolved at least once for the current suffix
    *  - no arg is currently locked
    *  - the current suffix is non-empty
@@ -1492,12 +1532,13 @@ echo "Hello, world!"
   function tryCommitRequiredArg(): boolean {
     if (!activeListCmd) return false;
     if (activeListCmd.action.type !== "dynamic_list") return false;
-    if ((activeListCmd.action.config.arg ?? "none") !== "required") return false;
+    const argMode = activeListCmd.action.config.arg ?? "none";
+    if (argMode !== "required" && argMode !== "context") return false;
     if (!dynamicListLoaded) return false;
     if (committedArg !== null) return false;
 
     const phrase = activeListCmd.phrase.toLowerCase();
-    const typed = effectiveInput.toLowerCase();
+    const typed = typedInput.toLowerCase();
     const suffix = typed.startsWith(phrase + " ") ? typed.slice(phrase.length + 1).trim() : "";
     if (!suffix) return false;
     // Don't commit while results are still in flight for a different arg.
@@ -1551,7 +1592,7 @@ echo "Hello, world!"
       // 2) Otherwise: Tab autocompletes to the longest partially-matched phrase.
       // Only considers commands whose phrase starts with what the user typed
       // but isn't fully typed yet (i.e. partial phrase matches, not param mode).
-      const typed = effectiveInput.toLowerCase();
+      const typed = typedInput.toLowerCase();
       if (typed === "") return;
       const candidates = allFiltered
         .filter(cmd => {
@@ -1681,6 +1722,7 @@ echo "Hello, world!"
         fullListItems = [];
         listLoadedPhrase = null;
         scriptInvokedArg = "";
+        scriptInvokedContext = "";
         // If a list is currently displayed, refresh it in case its file changed
         if (activeListCmd && activeListCmd.action.type === "static_list") {
           const listName = activeListCmd.action.config.list;
@@ -2202,6 +2244,7 @@ echo "Hello, world!"
                   <option value="paste_text">Paste Text</option>
                   <option value="copy_text">Copy Text</option>
                   <option value="open_url">Open URL</option>
+                  <option value="ctx_set">Set Context</option>
                 </select>
                 <span class="cmd-field-hint">Action applied to the selected list item's value.</span>
               </div>
@@ -2225,6 +2268,7 @@ echo "Hello, world!"
                   <option value="none">None</option>
                   <option value="optional">Optional</option>
                   <option value="required">Required</option>
+                  <option value="context">Context</option>
                 </select>
               </div>
               <div class="cmd-field">
@@ -2234,6 +2278,7 @@ echo "Hello, world!"
                   <option value="paste_text">Paste Text</option>
                   <option value="copy_text">Copy Text</option>
                   <option value="open_url">Open URL</option>
+                  <option value="ctx_set">Set Context</option>
                 </select>
               </div>
             {:else if cmdActionType === "script_action"}
@@ -2256,6 +2301,7 @@ echo "Hello, world!"
                   <option value="none">None</option>
                   <option value="optional">Optional</option>
                   <option value="required">Required</option>
+                  <option value="context">Context</option>
                 </select>
               </div>
               <div class="cmd-field">
@@ -2698,7 +2744,7 @@ echo "Hello, world!"
             {@const hasFilter = (() => {
               if (!activeListCmd) return false;
               const phrase = activeListCmd.phrase.toLowerCase();
-              const typed = effectiveInput.toLowerCase();
+              const typed = typedInput.toLowerCase();
               return typed.startsWith(phrase + " ") && typed.slice(phrase.length + 1).trim() !== "";
             })()}
             {#if hasFilter && fullListItems.length > 0}
@@ -2738,12 +2784,12 @@ echo "Hello, world!"
           <div class="no-results">No matching commands</div>
         {:else}
           {#each allFiltered as cmd, i}
-            {@const rawTyped   = input.trim()}
             {@const builtinAction = cmd.action.type === "builtin" ? cmd.action.config.action : null}
-            {@const ctxSetValue = builtinAction === "ctx_set" && rawTyped.toLowerCase().startsWith("/ctx set ") ? rawTyped.slice("/ctx set ".length).trim() : ""}
-            {@const isParamMode = builtinAction === null && effectiveInput.toLowerCase().startsWith(cmd.phrase.toLowerCase() + " ")}
-            {@const paramText  = isParamMode ? effectiveInput.slice(cmd.phrase.length + 1) : ""}
-            {@const hl        = highlight(cmd.phrase, effectiveInput)}
+            {@const ctxSetValue = builtinAction === "ctx_set" && typedInput.toLowerCase().startsWith("/ctx set ") ? typedInput.slice("/ctx set ".length).trim() : ""}
+            {@const isParamMode = builtinAction === null && typedInput.toLowerCase().startsWith(cmd.phrase.toLowerCase() + " ")}
+            {@const paramText  = isParamMode ? typedInput.slice(cmd.phrase.length + 1) : ""}
+            {@const isContextArg = (cmd.action.type === "script_action" || cmd.action.type === "dynamic_list") && cmd.action.config.arg === "context"}
+            {@const hl        = highlight(cmd.phrase, typedInput)}
             <!-- svelte-ignore a11y_no_static_element_interactions -->
             <!-- svelte-ignore a11y_click_events_have_key_events -->
             <div
@@ -2758,6 +2804,8 @@ echo "Hello, world!"
                 <span class="result-subtext">
                   {#if ctxSetValue}
                     → set context to "{ctxSetValue}"
+                  {:else if isContextArg && paramText.trim() === ""}
+                    {cmd.phrase}<span class="param-hint">{activeContext.trim() !== "" ? ` → uses context "${activeContext}"` : " → type a value or set a context"}</span>
                   {:else if isParamMode}
                     {cmd.phrase}<span class="param-hint"> → {paramText}</span>
                   {:else}

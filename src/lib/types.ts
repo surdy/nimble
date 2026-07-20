@@ -14,7 +14,7 @@ export interface CopyTextConfig {
   text: string;
 }
 
-export type ItemAction = "paste_text" | "copy_text" | "open_url";
+export type ItemAction = "paste_text" | "copy_text" | "open_url" | "ctx_set";
 
 export interface StaticListConfig {
   list: string;
@@ -22,8 +22,17 @@ export interface StaticListConfig {
   item_action?: ItemAction;
 }
 
-/** Controls when a dynamic_list script is invoked and whether a suffix arg is passed. */
-export type ArgMode = "none" | "optional" | "required";
+/**
+ * Controls when a script is invoked and whether a suffix arg is passed.
+ * - `none`: never pass a suffix arg.
+ * - `optional`: pass the typed suffix when present.
+ * - `required`: only fire when a suffix is typed; pass it as the arg.
+ * - `context`: like `required`, but an active context also satisfies the
+ *   requirement. A typed suffix overrides and is passed as the arg; with no
+ *   suffix but an active context the command fires with no positional arg and
+ *   the script reads NIMBLE_CONTEXT instead.
+ */
+export type ArgMode = "none" | "optional" | "required" | "context";
 
 export interface DynamicListConfig {
   /** Name of the script file (without path) inside `config_dir/scripts/`. */

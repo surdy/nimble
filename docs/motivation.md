@@ -33,7 +33,7 @@ Alfred and Raycast are excellent tools. Nimble isn't trying to replace them — 
 
 - **Privacy.** Some workflows involve sensitive data — customer names, account numbers, internal URLs. Running that through a third-party tool with cloud sync or telemetry is a hard no for many teams. Nimble is local-only by design; your commands and data never leave your machine.
 
-- **The Contexts feature.** The ability to set an active context and have it silently appended to every command phrase is something I really wanted in my own workflow, and it's not a natural fit for how existing tools are structured. Building it from scratch made more sense than trying to bolt it onto someone else's plugin system.
+- **The Contexts feature.** The ability to set an active context that every script can read as an ambient environment variable is something I really wanted in my own workflow, and it's not a natural fit for how existing tools are structured. Building it from scratch made more sense than trying to bolt it onto someone else's plugin system.
 
 - **A genuine learning exercise.** Nimble was built using GitHub Copilot as the primary coding assistant. That was an explicit goal — to explore what AI-assisted development looks like end-to-end on a real project. You can't learn that by extending an existing app.
 

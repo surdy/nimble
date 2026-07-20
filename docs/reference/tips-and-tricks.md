@@ -236,39 +236,26 @@ action:
 
 ---
 
-## Using contexts for scoped matching
+## Using contexts as an ambient value for scripts
 
-A **context** is a word or phrase that is silently appended to every command you type, so you can focus on a topic without retyping it. Type `ctx` in the launcher to manage it.
+A **context** is an ambient word or phrase carried alongside the launcher. It never affects command matching or parameters — every script simply receives it as the `NIMBLE_CONTEXT` environment variable.
 
-### Topic-locked web search
+### Project-scoped scripts
 
 ```
-/ctx set rust programming   → Enter
+/ctx set acme-webshop   → Enter
 ```
 
-Now type `search google` and press Enter → opens `google.com/search?q=rust+programming`. The context fills the `{param}` slot automatically.
+Now any `dynamic_list` or `script_action` script can read `NIMBLE_CONTEXT=acme-webshop` and scope its results — e.g. a `search tickets` script restricting queries to that project. What you type after the phrase is still the only script argument.
 
 Clear when done:
 
 ```
-ctx reset   → Enter
+/ctx reset   → Enter
 ```
 
-### Single-word site navigation
+### Cross-app coordination
 
-```
-/ctx set reddit   → Enter
-```
-
-Type `open` → matches the `open reddit` command immediately. No need to type the full phrase every time.
-
-### Scoped to a sub-phrase of a long command
-
-The context supplies the *end* of a phrase; you type the beginning. For example, with context `github` and a `search github` command:
-
-- Type `search` — effective input is `"search github"` — the command matches.
-- Press Enter with a `{param}` URL → the context word becomes the query.
-
-For a static list with phrase `team emails`, set context to `emails` and type `team` — effective input is `"team emails"` — the list auto-expands.
+The context is persisted to `state.json` and settable via `nimble://` deep links, so it doubles as a lightweight signal shared between Nimble scripts and other tools — set it from an automation tool, read it from any shell script.
 
 For the full reference including the built-in `/ctx set` and `/ctx reset` commands see [Contexts](../guides/contexts.md).

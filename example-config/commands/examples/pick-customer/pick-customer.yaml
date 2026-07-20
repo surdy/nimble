@@ -1,0 +1,7 @@
+phrase: pick customer
+title: Pick a customer (sets active context)
+action:
+  type: static_list
+  config:
+    list: customers
+    item_action: ctx_set

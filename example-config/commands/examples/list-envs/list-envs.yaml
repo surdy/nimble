@@ -1,0 +1,8 @@
+phrase: list envs
+title: List environments (arg: context example)
+action:
+  type: dynamic_list
+  config:
+    script: envs.sh
+    arg: context
+    item_action: open_url

@@ -59,6 +59,17 @@ action:
   config:
     script: find-file.sh
     arg: required
+
+# Like required, but the active context satisfies the requirement:
+# bare phrase + context set → runs immediately with no arg (script
+# reads NIMBLE_CONTEXT); typed suffix → passed as the arg instead
+phrase: list envs
+title: List environments
+action:
+  type: dynamic_list
+  config:
+    script: envs.sh
+    arg: context
 ```
 
 ---
@@ -70,12 +81,25 @@ action:
 | `none` *(default)* | Exact phrase match only | No arguments |
 | `optional` | Exact match (immediately) **or** phrase + space + suffix | No arg on exact match; suffix when present |
 | `required` | Only when a non-empty suffix follows the phrase | The typed suffix as its first argument |
+| `context` | Non-empty suffix (like `required`) **or** bare phrase while a [context](../guides/contexts.md) is set | The typed suffix as its first argument; no argument on bare phrase (script reads `NIMBLE_CONTEXT`) |
 
 For `optional` and `required` modes the script is re-invoked as the user types, with a 200 ms debounce to prevent excessive calls. For how to use arguments inside a script, see [Writing Scripts](../guides/writing-scripts.md#accepting-an-argument).
 
-### Locking the arg for client-side fuzzy filtering (`arg: required`)
+### `arg: context`
 
-For `arg: required` commands the suffix you type *is* the script's argument, so every keystroke re-runs the script. If you want to **stop re-invoking** and instead fuzzy-filter the results that have already come back, press <kbd>Tab</kbd> (or <kbd>→</kbd> when the cursor is at the end of the input) once the list has loaded. Nimble:
+`context` behaves like `required`, with the active context satisfying the requirement:
+
+- **Typed suffix** — identical to `arg: required`: the suffix is the script's argument (a *replacement* input, **not** a filter over context results), and the script is re-invoked with the 200 ms debounce as the suffix changes.
+- **Bare phrase + context set** — the script runs **immediately** (no debounce — nothing is being typed) with no positional argument; it reads the context from the `NIMBLE_CONTEXT` env var.
+- **Bare phrase, no context** — the script does not run; the command row shows a hint to type a value or set a context.
+
+The context value is never passed as the positional argument. If the active context changes while the list is showing (e.g. via a [deep link](../guides/external-context.md)), the cached results are considered stale and the script is re-invoked under the new context (or the list is dismissed when the context is cleared).
+
+Write context-aware scripts to prefer the explicit argument and fall back to the context: `TARGET="${1:-$NIMBLE_CONTEXT}"`.
+
+### Locking the arg for client-side fuzzy filtering (`arg: required` / `arg: context`)
+
+For `arg: required` (and `arg: context` with a typed suffix) the suffix you type *is* the script's argument, so every keystroke re-runs the script. If you want to **stop re-invoking** and instead fuzzy-filter the results that have already come back, press <kbd>Tab</kbd> (or <kbd>→</kbd> when the cursor is at the end of the input) once the list has loaded. Nimble:
 
 1. Locks the current suffix as the script's arg.
 2. Appends a space so you can immediately start typing a filter.
@@ -97,6 +121,7 @@ When an item is selected, Nimble uses the item's **`subtext`** as the value for 
 | `paste_text` | Item's `subtext` (or `title`) is pasted into the previously focused app |
 | `copy_text` | Item's `subtext` (or `title`) is copied to the clipboard |
 | `open_url` | Item's `subtext` (or `title`) is opened as a URL in the default browser |
+| `ctx_set` | Item's `subtext` (or `title`) becomes the active context; the input clears but the launcher stays open (same as the `/ctx set` builtin) |
 
 ---
 

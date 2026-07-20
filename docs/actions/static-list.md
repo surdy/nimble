@@ -86,6 +86,15 @@ action:
   config:
     list: bookmarks
     item_action: open_url
+
+# With ctx_set — selecting an item sets the active context, launcher stays open
+phrase: pick customer
+title: Pick a customer
+action:
+  type: static_list
+  config:
+    list: customers
+    item_action: ctx_set
 ```
 
 | `item_action` value | What happens on selection |
@@ -94,6 +103,7 @@ action:
 | `paste_text` | Item's `subtext` (or `title`) is pasted into the previously focused app |
 | `copy_text` | Item's `subtext` (or `title`) is copied to the clipboard |
 | `open_url` | Item's `subtext` (or `title`) is opened as a URL in the default browser |
+| `ctx_set` | Item's `subtext` (or `title`) becomes the active context; the input clears but the launcher stays open (same as the `/ctx set` builtin) |
 
 > **Note:** `subtext` serves a dual purpose — it's the secondary hint shown in the UI *and* the value used when the item is acted on. If `subtext` is absent, `title` is used instead.
 

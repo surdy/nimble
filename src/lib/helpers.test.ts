@@ -6,8 +6,6 @@ import {
   eventToShortcut,
   shortenPath,
   filterCommands,
-  isParamMode,
-  computeEffectiveInput,
   fuzzyScore,
   fuzzyFilterListItems,
 } from "$lib/helpers";
@@ -246,73 +244,6 @@ describe("filterCommands", () => {
     const result = filterCommands(commands, "search google hello");
     // Both are in param mode; "search google" is longer so it should be first
     expect(result[0].phrase).toBe("search google");
-  });
-});
-
-// ═══════════════════════════════════════════════════════════════════════
-// isParamMode
-// ═══════════════════════════════════════════════════════════════════════
-describe("isParamMode", () => {
-  const cmds = [
-    cmd("open google", openUrl("https://google.com")),
-    cmd("search google", openUrl("https://google.com/search?q={param}")),
-  ];
-
-  it("returns false for empty input", () => {
-    expect(isParamMode("", cmds)).toBe(false);
-  });
-
-  it("returns false for slash commands", () => {
-    expect(isParamMode("/ctx set work", cmds)).toBe(false);
-  });
-
-  it("returns false for partial match", () => {
-    expect(isParamMode("open goo", cmds)).toBe(false);
-  });
-
-  it("returns true when full phrase + extra text", () => {
-    expect(isParamMode("search google react hooks", cmds)).toBe(true);
-  });
-
-  it("returns false for exact phrase match (no trailing text)", () => {
-    expect(isParamMode("open google", cmds)).toBe(false);
-  });
-
-  it("is case-insensitive", () => {
-    expect(isParamMode("OPEN GOOGLE something", cmds)).toBe(true);
-  });
-});
-
-// ═══════════════════════════════════════════════════════════════════════
-// computeEffectiveInput
-// ═══════════════════════════════════════════════════════════════════════
-describe("computeEffectiveInput", () => {
-  const cmds = [
-    cmd("open google", openUrl("https://google.com")),
-  ];
-
-  it("returns trimmed input when no context is active", () => {
-    expect(computeEffectiveInput("  hello  ", "", cmds)).toBe("hello");
-  });
-
-  it("appends context when active and not in param mode", () => {
-    expect(computeEffectiveInput("open", "work", cmds)).toBe("open work");
-  });
-
-  it("does not append context when input starts with /", () => {
-    expect(computeEffectiveInput("/ctx set", "work", cmds)).toBe("/ctx set");
-  });
-
-  it("does not append context in param mode", () => {
-    expect(computeEffectiveInput("open google maps", "work", cmds)).toBe("open google maps");
-  });
-
-  it("does not append context when input is empty", () => {
-    expect(computeEffectiveInput("", "work", cmds)).toBe("");
-  });
-
-  it("does not append context when input is only whitespace", () => {
-    expect(computeEffectiveInput("   ", "work", cmds)).toBe("");
   });
 });
 

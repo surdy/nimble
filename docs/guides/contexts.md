@@ -1,27 +1,22 @@
 # Contexts
 
-A **context** is a word or phrase that is silently appended to every command you type, narrowing all matching to a particular topic without you having to keep retyping it.
+A **context** is an ambient word or phrase that Nimble carries alongside the launcher. It never changes how commands are matched and never becomes a parameter — it is simply made available to every script through the `NIMBLE_CONTEXT` environment variable, and to external tools through `state.json`.
 
 ---
 
 ## How it works
 
-When a context is active, Nimble substitutes your raw input with:
+Command matching and parameter extraction always use exactly what you type — nothing more:
 
-```
-effective input = raw input + " " + context
-```
+- Typed text is the **only** source of command matching. A phrase matches when your input contains it (or extends it with a parameter), regardless of any active context.
+- Typed text is the **only** source of parameters. The `{param}` value for `open_url`, and the argument passed to `dynamic_list` / `script_action` scripts, come solely from the text you type after the phrase.
+- The active context is delivered to every script it runs as the `NIMBLE_CONTEXT` environment variable (an empty string when no context is set). Scripts decide for themselves whether and how to use it.
 
-**Exception — parameter mode:** if the raw input already matches a known phrase plus trailing text (a parameter), context is **not** appended. This keeps user-supplied parameters clean; scripts and URLs receive only what the user explicitly typed. Scripts can still read the active context via the `NIMBLE_CONTEXT` environment variable.
+- `open_url` commands can read the active context via the `{context}` URL token (see [Open URL](../actions/open-url.md#with-the-active-context)).
+- `script_action` and `dynamic_list` commands with [`arg: context`](../actions/script-action.md#arg-context) treat an active context as satisfying an otherwise-required argument: with no typed suffix the command still fires (passing no positional argument, so the script reads `NIMBLE_CONTEXT`), while a typed suffix overrides and is passed as `$1`. The context is never passed as the positional argument. (See [Dynamic List](../actions/dynamic-list.md#arg-context) for the list-specific nuances, e.g. cache invalidation when the context changes.)
+- Any `static_list` or `dynamic_list` item with [`item_action: ctx_set`](../actions/static-list.md#item_action) sets the active context to the selected item's value (its `subtext`, or `title` if absent) and keeps the launcher open — a "context picker" that behaves like `/ctx set` without typing.
 
-This means:
-
-- Type `open` with context `reddit` → matches any command whose phrase contains `"open reddit"`.
-- Type `search google` with context `rust programming` → phrase `search google` matches exactly and the context `"rust programming"` fills the `{param}` value.
-- Type `search google cats` with context `rust programming` → the user supplied a parameter `"cats"`, so context is **not** appended; `{param}` is `"cats"`, not `"cats rust programming"`. The script/URL still has access to `NIMBLE_CONTEXT=rust programming`.
-- The context is invisible in the input bar — you just see what you type, but the matching uses the full phrase.
-
-When no context is set the launcher behaves exactly as usual.
+When no context is set the only difference is that `NIMBLE_CONTEXT` is empty (and `{context}` substitutes to an empty string).
 
 ---
 
@@ -41,17 +36,17 @@ These commands never dismiss the launcher — the window stays open so you can i
 Type `/ctx set` followed by a space and your context value, then press Enter:
 
 ```
-/ctx set reddit
+/ctx set project-x
 ```
 
-The input is cleared and the launcher stays open. You can now type any partial phrase and matching will happen as if you had added `" reddit"` to everything you type.
+The input is cleared and the launcher stays open. The context chip in the input bar shows the active value, and every script you run from now on receives `NIMBLE_CONTEXT=project-x`.
 
 ### Previewing the value before confirming
 
 While typing `/ctx set <value>`, the `/ctx set` result row shows a subtext preview:
 
 ```
-→ set context to "reddit"
+→ set context to "project-x"
 ```
 
 This confirms what will be stored before you press Enter.
@@ -62,67 +57,35 @@ This confirms what will be stored before you press Enter.
 /ctx reset
 ```
 
-Press Enter to clear the context. All matching returns to normal.
+Press Enter to clear the context. Scripts then receive `NIMBLE_CONTEXT` as an empty string.
 
 ---
 
-## Manual testing walkthrough
+## Using the context in scripts
 
-The examples below use commands that ship in the `example-config/` directory. Copy that directory into your live config to follow along:
+Any `dynamic_list` or `script_action` script can read the context and adapt its behaviour:
 
 ```bash
-cp -r example-config/* ~/Library/Application\ Support/Nimble/
+#!/bin/bash
+if [ -n "$NIMBLE_CONTEXT" ]; then
+  # Scope results to the active context (e.g. a project name)
+  search_issues --project "$NIMBLE_CONTEXT" "$1"
+else
+  search_issues "$1"
+fi
 ```
 
-### Test 1 — Context as phrase completion (`open_url`)
+The script's argument (`$1`) is always just the text the user typed after the command phrase — the context never leaks into it.
 
-**Goal:** type `open` and have it match `open reddit` automatically.
+### Walkthrough
 
-1. Open the launcher and run `/ctx set reddit` → press **Enter**.  
-   The input clears; the launcher stays open.
-2. Type `open`.  
-   You should see `open-reddit.yaml`'s entry (`Open Reddit`) in the results, because the effective input is `"open reddit"`.
-3. Press **Enter** to open `https://www.reddit.com`.
+1. Open the launcher and run `/ctx set project-x` → press **Enter**.
+   The input clears; the launcher stays open and the chip shows `project-x`.
+2. Type a phrase that triggers a script command (e.g. `search issues login bug`).
+   The script receives `login bug` as its argument and `NIMBLE_CONTEXT=project-x` in its environment.
+3. Run `/ctx reset` when you are done. The same command now runs with an empty `NIMBLE_CONTEXT`.
 
-**What happened:** `effectiveInput = "open" + " " + "reddit" = "open reddit"`, which matches the phrase `open reddit`.
-
-### Test 2 — Context as a search parameter (`open_url` with `{param}`)
-
-**Goal:** type `search google` and have the context value pass as the query.
-
-1. Run `/ctx set rust programming` → **Enter**.
-2. Type `search google` → press **Enter**.  
-   Your browser opens `https://www.google.com/search?q=rust+programming`.
-
-**What happened:** `effectiveInput = "search google" + " " + "rust programming"`. The phrase `search google` matches exactly, and the suffix `"rust programming"` is URL-encoded as the `{param}` value.
-
-### Test 2b — User-supplied parameter overrides context
-
-**Goal:** type `search google cats` and confirm the context is *not* appended to the parameter.
-
-1. Context is still `rust programming` from the previous test.
-2. Type `search google cats` → press **Enter**.  
-   Your browser opens `https://www.google.com/search?q=cats`.
-
-**What happened:** `"search google cats"` already places the raw input in param mode for the `search google` command, so context is skipped. The param is `"cats"`, not `"cats rust programming"`. The script could still read `NIMBLE_CONTEXT=rust programming` if it needed the context.
-
-### Test 3 — Context as a static list trigger
-
-The context supplies the *end* of a phrase, so you type the beginning and the context completes it. For the `team emails` static list (phrase: `team emails`):
-
-1. Run `/ctx set emails` → **Enter**.
-2. Type `team`.
-   `effectiveInput = "team" + " " + "emails" = "team emails"` — an exact match with the phrase.
-   The `team-emails` static list expands immediately, without pressing Enter.
-3. Select an item to paste its value.
-
-Regardless of what context is active, typing `/` always works normally. Effective input is not applied when the raw input starts with `/`.
-
-### Test 4 — Clearing the context
-
-1. Type `/ctx reset` → **Enter**.  
-   The context is cleared.
-2. Type `open` — now only commands whose phrase literally contains `"open"` are shown.
+Matching behaves identically in all three steps — the context only changes what scripts see in their environment.
 
 ---
 
@@ -142,29 +105,25 @@ Rejected examples:
 
 ## Typical workflows
 
-### Scoped site browsing
+### Project-scoped scripts
 
-Set context to a site keyword, then use short phrases to navigate:
-
-```
-/ctx set github
-```
-
-Then type:
-- `open` → matches `open github` → opens GitHub
-- `search` → if you have a `search github` command with `{param}`, the context fills the query
-
-### Topic-locked searches
-
-Set context to a search topic once at the start of a research session:
+Set the context to a project identifier once, then let your scripts scope themselves:
 
 ```
-/ctx set typescript generics
+/ctx set acme-webshop
 ```
 
-Then type `search google` → opens `google.com/search?q=typescript+generics` without retyping the topic each time.
+A `search tickets` script can read `NIMBLE_CONTEXT` and restrict its query to that project, while the launcher itself keeps matching commands purely on what you type.
 
-If you then type `search google advanced types`, the parameter `"advanced types"` overrides the context — the context is *not* appended. The search term is just `"advanced types"`.
+### Picking a context from a list
+
+Instead of typing `/ctx set <value>` from memory, a `static_list` or `dynamic_list` command with `item_action: ctx_set` lets you pick the value from a list — e.g. a list of customers or projects, with the slug as each item's `subtext`. Selecting an item sets the context and keeps the launcher open, exactly like `/ctx set`. See the [`pick customer`](../../example-config/commands/examples/pick-customer/pick-customer.yaml) example in `example-config/`.
+
+Commands using [`arg: context`](../actions/script-action.md#arg-context) (or the equivalent `dynamic_list` mode) then act on whatever was picked with nothing further typed — see the [`list envs`](../../example-config/commands/examples/list-envs/list-envs.yaml) example.
+
+### Cross-app coordination
+
+Because the context is persisted to `state.json` and settable via `nimble://` deep links, it doubles as a lightweight signal shared between Nimble scripts and other tools — set it from a Hammerspoon binding, read it from a shell script, clear it with `/ctx reset`.
 
 ### Clearing when done
 
@@ -172,7 +131,7 @@ If you then type `search google advanced types`, the parameter `"advanced types"
 /ctx reset
 ```
 
-All commands go back to matching against raw input only.
+`NIMBLE_CONTEXT` becomes an empty string for all subsequent script runs.
 
 ---
 

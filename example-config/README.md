@@ -59,10 +59,17 @@ example-config/
         ├── paste-team-emails-as-task/
         │   ├── paste-team-emails-as-task.yaml
         │   └── team-emails.sh
-        └── show-user-env/            # user-defined env demo (global + sidecar + inline)
-            ├── show-user-env.yaml
-            ├── env.yaml              # sidecar env vars for this command
-            └── user-env.sh
+        ├── show-user-env/            # user-defined env demo (global + sidecar + inline)
+        │   ├── show-user-env.yaml
+        │   ├── env.yaml              # sidecar env vars for this command
+        │   └── user-env.sh
+        ├── list-envs/                # dynamic_list, arg: context — runs on a typed
+        │   ├── list-envs.yaml        # suffix (override) or a bare phrase + active
+        │   └── envs.sh               # context (reads NIMBLE_CONTEXT); neither → no run
+        ├── pick-customer/            # static_list, item_action: ctx_set — context picker
+        │   ├── pick-customer.yaml
+        │   └── customers.tsv
+        └── open-dashboard.yaml       # open_url with the {context} URL token
 ```
 
 ## Examples covered
@@ -86,3 +93,10 @@ example-config/
 | `say hello` | [`dynamic_list`](docs/actions/dynamic-list.md) | Shows a filterable list of greetings |
 | `paste timestamp` | [`script_action`](docs/actions/script-action.md) | Pastes the current date/time |
 | `show user env` | [`dynamic_list`](docs/actions/dynamic-list.md) | Shows user-defined env vars (global + sidecar + inline demo) |
+| `list envs` | [`dynamic_list`](docs/actions/dynamic-list.md) | `arg: context` example — typed suffix overrides, bare phrase falls back to the active context |
+| `pick customer` | [`static_list`](docs/actions/static-list.md) | `item_action: ctx_set` example — selecting a customer sets it as the active context |
+| `open dashboard` | [`open_url`](docs/actions/open-url.md) | Uses the `{context}` URL token to open a context-scoped dashboard |
+
+### Trying the context examples
+
+`list envs`, `pick customer`, and `open dashboard` demonstrate the three ways commands consume the [active context](docs/guides/contexts.md): `arg: context`, `item_action: ctx_set`, and the `{context}` URL token. Type `pick customer` and select one to set the context (e.g. `acme`), then type `list envs` or `open dashboard` — both act on `acme` with nothing else typed. Typing `list envs globex` overrides the context for that one call.
